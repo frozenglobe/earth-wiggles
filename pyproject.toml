@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools", "wheel", "setuptools_scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eulith"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+authors = [ { name = "Jessica Lok", email = "jhyl3@cam.ac.uk" }]
+dependencies = ["numpy", "pandas", "obspy", "matplotlib", "basemap"]
+
+[tool.setuptools.packages.find]
+include = ["eulith*"]
