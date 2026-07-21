@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from obspy.clients.fdsn import Client, RoutingClient, header
 from obspy.core.inventory import Channel, Station, Inventory
+from obspy.clients.fdsn.header import FDSNException, FDSNNoAuthenticationServiceException
 
 cred = '/space/jhyl3/.eidatoken'
 
@@ -52,23 +53,33 @@ def check_server(node:str):
             Client(node); return 1
         except: return 2
 
-def fdsn_connect(node:str, cred:str=None):
+def fdsn_connect(node:str=None, node_path:str=None, cred:str=None):
     """
     Connects to an FDSN server and returns a client object.
 
     :type node: str
     :param node: FDSN node name
+    :type node_path: str
+    :param node_path: Optional path to the FDSN node. If provided, it will be used instead of looking up the node in the FDSN registry.
     :type cred: str
     :param cred: Path to EIDA credentials file
-    :return: FDSN client object
+    :return: FDSN client object, authentication status
     """
+    auth = False
+    redirect = False
+    if (node is None) and (node_path is None): raise ValueError("Node name must be provided if node path is not specified.")
     node = node.upper()
-    try: 
-        client = Client(fdsn_registry_dict().get(node), eida_token=cred)
-    except: 
-        try: client = Client(node, eida_token=cred)
-        except: raise Exception(f"Connection to {node} failed. Check node name and credentials.")
-    return client
+    if node_path is None: node_path = fdsn_registry_dict().get(node)
+    if cred: auth = True
+
+    try: client = Client(node_path, eida_token=cred)
+    except Exception as e: 
+        redirect = True
+        if isinstance(e, FDSNNoAuthenticationServiceException): cred = None; auth = False
+        elif node is not None: node_path = node
+        try: client = Client(node_path, eida_token=cred, force_redirect=redirect)
+        except: raise Exception(f"Connection to {node_path} failed. Check node path and credentials.")
+    return client, auth, node_path
 
 def fdsn_exception_lookup():
     """

@@ -5,8 +5,8 @@ import duckdb
 from obspy import UTCDateTime
 from obspy.clients.fdsn import Client
 from obspy.taup.tau import TauPyModel as TPM
-from fdsn import adriaarray_nw, fdsn_connect
-from utils import read_stnlist, read_cmt, latlon_filter, overlap
+from eulith.core.fdsn import adriaarray_nw, fdsn_connect
+from eulith.core.utils import read_stnlist, read_cmt, latlon_filter, overlap
 
 # work in progress
 
@@ -14,7 +14,7 @@ eida_cred = '/space/jhyl3/.eidatoken'
 iris_cred = ('cocky_swanson', '6b8TEAqkjpQCUKz8') # (username, password)
 
 def check_restricted(node:str,
-                     eida_cred:str=eida_cred,
+                     client:Client=None, eida_cred:str=eida_cred,
                      lat_min:str=32, lat_max:str=72, lon_min:str=-12, lon_max:str=48,
                      starttime:pd.Timestamp=None, endtime:pd.Timestamp=None):
     """
@@ -38,7 +38,7 @@ def check_restricted(node:str,
     :param endtime: end time for station filtering
     :return: tuple of lists (networks to remove, stations to remove, stations to check for restricted access)
     """
-    if not client: client = fdsn_connect(node, cred=eida_cred)
+    if not client: client = fdsn_connect(node, cred=eida_cred)[0]
     if node == 'NOA': nw_check = ['HL']
     else: nw_check = []
     if node == 'LMU': nw_remove = ['ZJ']
@@ -58,7 +58,7 @@ def check_restricted(node:str,
 
 def test_restricted(stn_to_test:pd.DataFrame, 
                     node_path:str,
-                    auth:int, eida_cred:str=eida_cred):
+                    auth:bool, eida_cred:str=eida_cred):
     stn_remove = []
     # for stn in stn_check:
     stn_test_req = list(zip(
@@ -71,7 +71,7 @@ def test_restricted(stn_to_test:pd.DataFrame,
                             ))
         
     count_403 = 0
-    if auth == 0: eida_cred = None
+    if not auth: eida_cred = None
     client = Client(node_path, eida_token=eida_cred)
     
     for req in stn_test_req:
@@ -98,21 +98,28 @@ def process_stnlist(stnlist_path:str,
                     sr_min:float=1., sr_max:float=100., 
                     bands:list=['L', 'B', 'H'], gain:str='H', 
                     starttime:pd.Timestamp=None, endtime:pd.Timestamp=None,
-                    screen:bool=True, verbose:bool=True):
+                    screen:bool=True, client:Client=None, verbose:bool=True):
     
     stnlist = read_stnlist(stnlist_path)
-    
+
     # filtering
     stnlist_filt = stnlist[stnlist['dc'] == node] # filter by node
     stnlist_filt = latlon_filter(stnlist_filt, lat_min, lat_max, lon_min, lon_max) # filter by latlon
-    stnlist_filt = stnlist_filt[stnlist_filt['samplerate'].between(sr_min, sr_max)] # filter by sample rate
-    stnlist_filt = stnlist_filt[stnlist_filt['bandgain'].apply(lambda x: x[1] == gain)] # filter by gain
-    stnlist_filt = stnlist_filt[stnlist_filt['bandgain'].apply(lambda x: x[0] in bands)] # only keep long corner periods
-    stnlist_filt = stnlist_filt[stnlist_filt['channel'].apply(lambda x: len(x) == 3)] # filter by existence of three components
+    stnlist_filt = stnlist_filt[(stnlist_filt['samplerate'].between(sr_min, sr_max)) & # filter by sample rate
+                                (stnlist_filt['bandgain'].apply(lambda x: x[1] == gain)) & # filter by gain
+                                (stnlist_filt['bandgain'].apply(lambda x: x[0] in bands)) & # only keep long corner periods
+                                (stnlist_filt['channel'].apply(lambda x: len(x) == 3)) # filter by existence of three components
+                                ]
+    # stnlist_filt = stnlist_filt[stnlist_filt['bandgain'].apply(lambda x: x[1] == gain)]
+    # stnlist_filt = stnlist_filt[stnlist_filt['bandgain'].apply(lambda x: x[0] in bands)]
+    # stnlist_filt = stnlist_filt[stnlist_filt['channel'].apply(lambda x: len(x) == 3)]
 
     # remove restricted stations if screen is True
     if screen: 
-        nw_remove, stn_remove, stn_check = check_restricted(node, lat_min, lat_max, lon_min, lon_max, starttime, endtime)
+        nw_remove, stn_remove, stn_check = check_restricted(node=node, client=client, eida_cred=eida_cred,
+                                                            lat_min=lat_min, lat_max=lat_max, 
+                                                            lon_min=lon_min, lon_max=lon_max, 
+                                                            starttime=starttime, endtime=endtime)
         if nw_remove: stnlist_filt = stnlist_filt[~stnlist_filt['network'].isin(nw_remove)].reset_index(drop=True)
 
         if stn_remove: 
@@ -133,7 +140,9 @@ def process_stnlist(stnlist_path:str,
     stnlist_filt.rename(columns={'dc':'node', 'stn_code':'stcode', 'latitude':'stlat', 'longitude':'stlon', 'elevation':'stelev', 'starttime':'ststarttime', 'endtime':'stendtime'}, inplace=True)
 
     if verbose: print(f"Processed station list: {len(stnlist_filt['stcode'].unique())} stations remain after filtering")
-    return stnlist_filt
+    
+    if screen: return stnlist_filt, stn_check
+    else: return stnlist_filt
 
 def process_cmt(cmt_path:str, starttime:pd.Timestamp, endtime:pd.Timestamp, verbose:bool=True):
     """
@@ -161,18 +170,15 @@ def evst_generator(cmt_df:pd.DataFrame,
                    tt_model:str='ak135',
                    stn_check:list=[],
                    _node_path:str=None,
-                   _auth:int=0,
+                   _auth:bool=False,
                    eida_cred:str=eida_cred):
     
-    if stnlist.empty:
-        print("No stations available after filtering. Exiting.")
-        raise SystemExit("No stations available.")
+    if stnlist.empty: raise SystemExit("No stations available.")
 
-    if cmt_df.empty:
-        print("No events available after filtering. Exiting.")
-        raise SystemExit("No events available.")
+    if cmt_df.empty: raise SystemExit("No events available.")
     
     model = TPM(model=tt_model)
+    print(f"    Initialised travel time model: {tt_model}")
     vg_min = 2.8 # minimum group velocity in km/s
     # epicentral distance range in km
     dist_min = 400
@@ -197,8 +203,8 @@ def evst_generator(cmt_df:pd.DataFrame,
                 cos(radians(e.evlat)) * cos(radians(s.stlat)) * cos(radians(s.stlon - e.evlon))
             )) AS dist_deg,
             dist_deg * 6371. * pi()/180. AS epi_dist
-        FROM stn_list_filt s
-        JOIN cmt_processed e
+        FROM stnlist s
+        JOIN cmt_df e
         ON e.evtime BETWEEN s.ststarttime AND s.stendtime
     )
     SELECT *
@@ -290,10 +296,10 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     evst_windows['req_start'] = [UTCDateTime(t) for t in evst_windows['window_start']]
     evst_windows['req_end'] = [UTCDateTime(t) for t in evst_windows['window_end']]
-    evst_windows['log_path'] = [f"logs/{n}/{c}.log".lower() for n, c in zip(evst_windows.node, evst_windows.stcode)]
+    evst_windows['log_path'] = [f"logs/{n}/sta/{c}.log".lower() for n, c in zip(evst_windows.node, evst_windows.stcode)]
 
     evst_results = evst_windows.copy()
-    evst_results['status'] = 4
+    evst_results['status'] = 0
     path_process = (pd.Series([f"{e}" + str(s)[0] + f"/{c}/" for e, s, c in zip(evst_results.evpath, evst_results.station, evst_results.stcode)])).to_list()
     evst_results['data_path'] = [p[:-1].lower() for p in path_process]
 
@@ -316,14 +322,15 @@ def read_evst(path):
     Given a .csv path, reads the evst csv file into the same dtypes as generation.
 
     :type path: str
-
+    :param path: path to the evst csv file
+    :return: pd.DataFrame with the evst data
     """
     import pandas as pd
     from obspy import UTCDateTime
     import ast
     columns = ['node', 'network', 'station', 'stcode', 'cmt', 'evtime', 'evlat', 'evlon', 'evdep', 'moment_magnitude', \
-            'evpath', 'stlat', 'stlon', 'stelev', 'epi_dist', 'bands', 'ptime', 'window_start', 'window_end', \
-            'req_start', 'req_end', 'log_path', 'status', 'data_path']
+               'evpath', 'stlat', 'stlon', 'stelev', 'epi_dist', 'bands', 'ptime', 'window_start', 'window_end', \
+               'req_start', 'req_end', 'log_path', 'status', 'data_path']
     dtypes = [str] * 6 + [np.float64] * 4 + [str] * 1 + [np.float64] * 4 + [str] * 1 + [np.float64] * 1 + [str] * 5 + [np.int64] * 1 + [str] * 1
 
     dtype_dict = dict(zip(columns, dtypes))
@@ -334,29 +341,9 @@ def read_evst(path):
     for k in keys: evst_import[k] = pd.to_datetime(evst_import[k], format='mixed')
 
     keys = ['req_start', 'req_end']
-    for k in keys: evst_import.loc[:, k] = [UTCDateTime(t) for t in evst_import[k]]
-
-    evst_import.loc[:, 'bands'] = evst_import['bands'].apply(lambda x: ast.literal_eval(x) if (", " in x) \
+    for k in keys: evst_import[k] = [UTCDateTime(t) for t in evst_import[k]]
+    evst_import['bands'] = evst_import['bands'].apply(lambda x: ast.literal_eval(x) if (", " in x) \
                                                              else [s.strip("''") for s in x.strip('[]').split(' ')])
-    evst_import.loc[:, 'bands'] = evst_import['bands'].apply(np.array)
+    evst_import['bands'] = evst_import['bands'].apply(np.array)
 
     return evst_import
-
-class evstdf(pd.DataFrame):
-
-    def __init__(self, evst_path=None):
-        if evst_path is not None:
-            to_initialise = read_evst(evst_path)
-        else:
-            columns = ['node', 'network', 'station', 'stcode', 'cmt', 'evtime', 'evlat', 'evlon', 'evdep', 'moment_magnitude', \
-               'evpath', 'stlat', 'stlon', 'stelev', 'epi_dist', 'bands', 'ptime', 'window_start', 'window_end', \
-               'req_start', 'req_end', 'log_path', 'status', 'data_path', 'channel']
-            dtypes = [str] * 6 + [np.float64] * 4 + [str] * 1 + [np.float64] * 4 + [str] * 1 + [np.float64] * 1 + [str] * 5 + [np.int64] * 1 + [str] * 2
-            dtype_dict = dict(zip(columns, dtypes))
-            to_initialise = pd.DataFrame(columns=columns, dtype=dtype_dict)
-        
-        super().__init__(to_initialise)
-
-    @property
-    def _constructor(self):
-        return evstdf

@@ -139,6 +139,26 @@ def overlap(start1, end1, start2, end2):
     """
     return start1 <= end2 and start2 <= end1
 
+def convert_n1e2z3(chan_code:str, reverse=False):
+    """
+    Converts channel codes between 'N', 'E', 'Z' and '1', '2', '3'.
+
+    :type chan_code: str
+    :param chan_code: Channel code to convert ('N', 'E', 'Z' or '1', '2', '3').
+    :type reverse: bool
+    :param reverse: If True, converts from '1', '2', '3' to 'N', 'E', 'Z'. 
+    If False (default), converts from 'N', 'E', 'Z' to '1', '2', '3'.
+    :return: Converted channel code.
+    """
+    chan_dict = {'N': '1', 'E': '2', 'Z': '3'}
+
+    if not reverse:
+        if chan_code in ['N', 'E', 'Z']: return chan_dict.get(chan_code)
+        else: return chan_code
+    if reverse:
+        if chan_code in ['1', '2', '3']: return {v: k for k, v in chan_dict.items()}.get(chan_code)
+        else: return chan_code
+
 ### vector operations
 
 def sph_to_car(sphvec:tuple, precision:int=12):
