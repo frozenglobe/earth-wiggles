@@ -58,7 +58,7 @@ def check_restricted(node:str,
 
 def test_restricted(stn_to_test:pd.DataFrame, 
                     node_path:str,
-                    auth:bool, eida_cred:str=eida_cred):
+                    eida_cred:str=eida_cred):
     stn_remove = []
     # for stn in stn_check:
     stn_test_req = list(zip(
@@ -71,7 +71,6 @@ def test_restricted(stn_to_test:pd.DataFrame,
                             ))
         
     count_403 = 0
-    if not auth: eida_cred = None
     client = Client(node_path, eida_token=eida_cred)
     
     for req in stn_test_req:
@@ -110,10 +109,6 @@ def process_stnlist(stnlist_path:str,
                                 (stnlist_filt['bandgain'].apply(lambda x: x[0] in bands)) & # only keep long corner periods
                                 (stnlist_filt['channel'].apply(lambda x: len(x) == 3)) # filter by existence of three components
                                 ]
-    # stnlist_filt = stnlist_filt[stnlist_filt['bandgain'].apply(lambda x: x[1] == gain)]
-    # stnlist_filt = stnlist_filt[stnlist_filt['bandgain'].apply(lambda x: x[0] in bands)]
-    # stnlist_filt = stnlist_filt[stnlist_filt['channel'].apply(lambda x: len(x) == 3)]
-
     # remove restricted stations if screen is True
     if screen: 
         nw_remove, stn_remove, stn_check = check_restricted(node=node, client=client, eida_cred=eida_cred,
@@ -170,7 +165,6 @@ def evst_generator(cmt_df:pd.DataFrame,
                    tt_model:str='ak135',
                    stn_check:list=[],
                    _node_path:str=None,
-                   _auth:bool=False,
                    eida_cred:str=eida_cred):
     
     if stnlist.empty: raise SystemExit("No stations available.")
@@ -239,7 +233,6 @@ def evst_generator(cmt_df:pd.DataFrame,
     evst_band_combined = duckdb.query(query).to_df()
 
     # Compute theoretical P-wave travel times and window start/end times
-
     evst_band_combined['dist_deg_round'] = evst_band_combined['dist_deg'].round(1)
     evst_band_combined['evdep_round'] = (evst_band_combined['evdep'] / 2).round() * 2
     unique_pairs = evst_band_combined[['evdep_round', 'dist_deg_round']].drop_duplicates()
@@ -281,19 +274,11 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     print(f"    Computed request windows. Total station-event pairs to request: {len(evst_windows)}")
 
-    '''
-    Prepare datetimes for request, defines `log_path', 
-    creates master `evst_results' dataframe,
-    sets status to 4 (to be requested), defines `data_path'
     
-    Statuses explained:
-        0: success
-        1: no data
-        2: server exception
-        3: processing error
-        4: to be requested
-    '''
-
+    # Prepare datetimes for request, defines `log_path', 
+    # creates master `evst_results' dataframe,
+    # sets status to 0 (to be requested), defines `data_path'
+    
     evst_windows['req_start'] = [UTCDateTime(t) for t in evst_windows['window_start']]
     evst_windows['req_end'] = [UTCDateTime(t) for t in evst_windows['window_end']]
     evst_windows['log_path'] = [f"logs/{n}/sta/{c}.log".lower() for n, c in zip(evst_windows.node, evst_windows.stcode)]
@@ -308,7 +293,7 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     if not evst_stn_check.empty:
         print(f"Testing stations with ambiguous restricted status")
-        stn_remove = test_restricted(evst_stn_check, node_path=_node_path, auth=_auth, eida_cred=eida_cred)
+        stn_remove = test_restricted(evst_stn_check, node_path=_node_path, eida_cred=eida_cred)
         # remove stations with 403 errors
         mask = evst_results['station'].isin(stn_remove)
         stc_remove_list = evst_results.loc[mask, 'stcode'].unique()
@@ -347,3 +332,20 @@ def read_evst(path):
     evst_import['bands'] = evst_import['bands'].apply(np.array)
 
     return evst_import
+
+def merge_evsts(evst_list:list, status:str='max'):
+    """
+    Merges two evst dataframes, keeping the highest (if 'max') status code 
+
+    :type evst_list: list
+    :param evst_list: List of evst dataframes to merge
+    :type status: str
+    :param status: 'max' or 'min', determines whether to keep the highest or lowest status code when merging
+    :return: Merged evst dataframe
+    """
+    columns = evst_list[0].columns
+    agg_dict = {col: 'first' for col in columns}
+    agg_dict['status'] = status
+    evst_all = pd.concat(evst_list).groupby('data_path', as_index=False).agg(agg_dict)
+    return evst_all
+

@@ -1,9 +1,52 @@
 # Generic tools
-import ast
+import ast, os, shutil
+from glob import glob
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from obspy import UTCDateTime
 
+# file operations
+def _copy_file(src:str, dst:str, follow_symlinks:bool=True):
+    """
+    Copies a file from source to destination, creating parent directories which don't exist.
+    If the destination file already exists, it will be overwritten. Uses shutil.copy2.
+
+    :type src: str
+    :param src: path to the source file
+    :type dst: str
+    :param dst: path to the destination file
+    :type follow_symlinks: bool
+    :param follow_symlinks: if True (default), will copy the file pointed to by src if it is a symlink.
+    If False, will copy the symlink itself.
+    """
+
+    # check if file already exists. use lexists otherwise returns False for broken symlinks
+    if os.path.lexists(dst):
+        # if symlink need to remove, because shutil.copy2 will not overwrite symlinks
+        if os.path.islink(dst): os.remove(dst)
+    # create parent directories if they don't exist
+    else: Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+    return
+
+def _create_symlink(src:str, dst:str):
+    """
+    Creates a symbolic link pointing to src named dst. If the destination file already exists, it will be overwritten.
+
+    :type src: str
+    :param src: path to the source file
+    :type dst: str
+    :param dst: path to the destination file
+    """
+    # check if file already exists. use lexists otherwise returns False for broken symlinks
+    if os.path.lexists(dst):
+        # if symlink need to remove, because os.symlink will not overwrite symlinks
+        if os.path.islink(dst): os.remove(dst)
+    # create parent directories if they don't exist
+    else: Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(src, dst)
+    return
 
 def read_stnlist(path:str):
     """

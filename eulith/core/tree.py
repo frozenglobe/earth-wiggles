@@ -1,11 +1,15 @@
 # A series of tools to help with the directory structure of the data, including evst dataframes
 
-import os, ast
+import os, ast, shutil
 from glob import glob
+from pathlib import Path
 from random import choice
 import numpy as np
 import pandas as pd
 from obspy import UTCDateTime
+
+from eulith.core.utils import _copy_file, _create_symlink
+
 
 master_path = '/space/jhyl3/data_retrieval/europe'
 
@@ -83,55 +87,6 @@ def read_chunk_error(path):
         lines = f.read().splitlines()
         return [ast.literal_eval(line.rsplit(', ', 2)[0] + ')') for line in lines]
 
-### evst dataframe tools
-
-def read_evst(path):
-    """
-    Given a .csv path, reads the evst csv file into the same dtypes as generation.
-
-    :type path: str
-
-    """
-    import pandas as pd
-    from obspy import UTCDateTime
-    import ast
-    columns = ['node', 'network', 'station', 'stcode', 'cmt', 'evtime', 'evlat', 'evlon', 'evdep', 'moment_magnitude', \
-               'evpath', 'stlat', 'stlon', 'stelev', 'epi_dist', 'bands', 'ptime', 'window_start', 'window_end', \
-               'req_start', 'req_end', 'log_path', 'status', 'data_path']
-    dtypes = [str] * 6 + [np.float64] * 4 + [str] * 1 + [np.float64] * 4 + [str] * 1 + [np.float64] * 1 + [str] * 5 + [np.int64] * 1 + [str] * 1
-
-    dtype_dict = dict(zip(columns, dtypes))
-
-    evst_import = pd.read_csv(path, dtype=dtype_dict)
-
-    keys = ['evtime', 'window_start', 'window_end']
-    for k in keys: evst_import[k] = pd.to_datetime(evst_import[k], format='mixed')
-
-    keys = ['req_start', 'req_end']
-    for k in keys: evst_import.loc[:, k] = [UTCDateTime(t) for t in evst_import[k]]
-
-    evst_import.loc[:, 'bands'] = evst_import['bands'].apply(lambda x: ast.literal_eval(x) if (", " in x) \
-                                                             else [s.strip("''") for s in x.strip('[]').split(' ')])
-    evst_import.loc[:, 'bands'] = evst_import['bands'].apply(np.array)
-
-    return evst_import
-
-def merge_evsts(evst_list:list, status:str='max'):
-    """
-    Merges two evst dataframes, keeping the highest (if 'max') status code 
-
-    :type evst_list: list
-    :param evst_list: List of evst dataframes to merge
-    :type status: str
-    :param status: 'max' or 'min', determines whether to keep the highest or lowest status code when merging
-    :return: Merged evst dataframe
-    """
-    columns = evst_list[0].columns
-    agg_dict = {col: 'first' for col in columns}
-    agg_dict['status'] = status
-    evst_all = pd.concat(evst_list).groupby('data_path', as_index=False).agg(agg_dict)
-    return evst_all
-
 def generate_error_dict(df=None, node=None, year=None):
     """
     For a given evst dataframe, or a node, displays the unique error codes each station records
@@ -171,3 +126,84 @@ def check_ami_status(path:str):
     elif len([s for s in files if s.startswith('NOD')]) == 0:
         return 21
     else: return 20
+
+def _copy_cmt(evst:pd.DataFrame, src:str, dst:str):
+    """
+    Minimal checks
+
+    :type evst: pd.DataFrame
+    :param evst: evst dataframe
+    :type src: str
+    :param src: source directory
+    :type dst: str
+    :param dst: destination directory
+    :return: log of errors
+    """
+    log = []
+    for path in evst['evpath'].unique():
+        cmt_rel_path = os.path.join(path, f"cmt{path.strip('/').split('/')[-1]}")
+        old_cmt_path = os.path.join(src, cmt_rel_path)
+        new_cmt_path = os.path.join(dst, cmt_rel_path)
+        if os.path.exists(new_cmt_path): continue
+        Path(new_cmt_path).parent.mkdir(parents=True, exist_ok=True)
+        try: shutil.copy2(old_cmt_path, new_cmt_path)
+        except Exception as e: log.append((1, path, 'copy-cmt', str(e)))
+    return log
+
+def copy_tree(cmplst:list[str], 
+              evst:pd.DataFrame,
+              src:str, dst:str,
+              symlink:bool=False):
+    """
+    Copies files from source to destination directory, maintaining directory structure.
+    
+    :type cmplst: list[str]
+    :param cmplst: list of components, e.g. ['z', 'r', 't']
+    :type evst: pd.DataFrame
+    :param evst: event-station dataframe
+    :type src: str
+    :param src: str, source directory
+    :type dst: str
+    :param dst: str, destination directory
+    :type symlink: bool
+    :param symlink: if True, creates symlinks instead of copying files
+    :return: tuple: list of new file paths and log of errors
+    """
+    log = []
+
+    # copy files from src to dst, maintaining the same directory structure
+    state = "symlink" if symlink else "copy"
+    cmplst = [c.lower() for c in cmplst]
+    new_file_paths = []
+
+    for path in evst['data_path']:
+        old_path = os.path.join(src, path)
+
+        for cmp in cmplst: 
+            file_path = glob(f"{old_path}/*.d{cmp}")
+
+            if len(file_path) == 1:
+                # compute new path
+                old_file_path = file_path[0]
+                rel_path = os.path.relpath(old_file_path, src)
+                filename = os.path.relpath(rel_path, path)
+                filename = filename.split('_')[-1]
+                rel_path = os.path.join(path, filename)
+                new_file_path = os.path.join(dst, rel_path)
+
+                try:
+                    if symlink: _create_symlink(old_file_path, new_file_path)
+                    else: _copy_file(old_file_path, new_file_path)
+                    new_file_paths.append(new_file_path)
+
+                except Exception as e: log.append((1, path, f'{state}-{cmp}', str(e)))
+
+            elif len(file_path) == 0:
+                log.append((1, path, f'{state}-{cmp}', "file doesn't exist"))
+
+            else: raise ValueError(f"Multiple files found for {path} with component {cmp}: {file_path}")
+
+    # copy CMTs
+    log.extend(_copy_cmt(evst=evst, src=src, dst=dst))
+    
+    return new_file_paths, log
