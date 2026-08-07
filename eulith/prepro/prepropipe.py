@@ -2,6 +2,7 @@ master_path = '/space/jhyl3/data_retrieval/europe'
 starttime = '2022-01-01T00:00:00'
 endtime = '2024-12-31T23:59:59'
 
+ob_threads = 5
 njob_rr = 8
 njob_rot = 1
 njob_res = 1
@@ -12,7 +13,7 @@ no_evs = 8 # how many days to keep in the queue
 import os, argparse, signal
 
 from scipy import stats
-os.environ['OPENBLAS_NUM_THREADS'] = '5'
+os.environ['OPENBLAS_NUM_THREADS'] = f"{ob_threads}" #
 import pandas as pd
 from obspy import read
 from obspy.taup import TauPyModel
@@ -22,7 +23,7 @@ from pathlib import Path
 import fortranformat as ff
 
 from eulith.core import read_evst, fdsn_registry_dict
-from functions import prefilt, remove_resp, rotate_rt
+from eulith.prepro.functions import prefilt, remove_resp, rotate_rt
 
 os.chdir(master_path)
 print(f"CWD: ./{master_path.split('/')[-1]}")
@@ -234,7 +235,7 @@ def process_rr(client:Client,
     :param mlog: Master log file for logging each worker's progress
     """
 
-    print(f'RESPONSE_REMOVAL: running :: {os.getpid()}')
+    print(f'RESPONSE_REMOVAL :: running :: {os.getpid()}')
     mlog.write(f">   {pd.Timestamp.now()}    RESPONSE_REMOVAL: running    {os.getpid()}\n")
     mlog.flush()
 

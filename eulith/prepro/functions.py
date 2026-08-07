@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from obspy import Stream, Trace, read
-from obspy.core.inventory import Inventory
+from obspy import Stream, Trace, read, UTCDateTime
+from obspy.core.inventory import Inventory, Station
 from obspy.signal.rotate import rotate2zne, rotate_ne_rt
 from obspy.clients.fdsn import Client
 
@@ -87,45 +87,6 @@ def _band_sort(band_list:list):
     key = {'L':1, 'B':2, 'H':3}
     return sorted(list(set(band_list)), key=lambda x: (key.get(x[0], 4), x))
 
-### download functions
-
-def event_sort(events):
-    """
-    Sort events into groups avoiding overlapping time windows. 
-    Returns a list of dataframes, each containing events which don't overlap in time.
-
-    :type events: pandas.DataFrame
-    :param events: dataframe containing events with 'window_start' and 'window_end' columns
-    :return: list of pandas.DataFrame, each containing non-overlapping events
-    """
-    gp = []
-    window_idx = events.columns.get_indexer(['window_start', 'window_end'])
-    for i, e in enumerate(events.itertuples()):
-        if not gp: gp = [[[i, e]]]; continue
-        else: 
-            j = i - len(gp)
-            condition = overlap(events.iloc[j,window_idx[0]], events.iloc[j,window_idx[1]], e.window_start, e.window_end)
-            if condition:
-                gp.append([[i, e]]); continue
-            else:
-                idx = [m for m, g in enumerate(gp) if g[-1][0] == j][0]
-                gp[idx].append([i, e]); continue
-    return [pd.DataFrame([ev[1] for ev in g]) for g in gp]
-
-def request_waveforms(client:Client, request_list:list):
-    try: 
-        resp = client.get_waveforms_bulk(request_list)
-        error = None
-    except Exception as e:
-        resp = None
-        if hasattr(e, 'status_code'): 
-            error = int(e.status_code) # not sure if this is problematic
-            print(f"Error status code: {type(e).__name__}/{e.status_code}")
-        else: 
-            error = type(e).__name__
-            print(f"Error in bulk request: {error}")
-    return resp, error
-
 def _process_checks(evst:pd.DataFrame, threshold:float=0.9):
     """
     Performs checks on the evst dataframe to identify events with missing components, short traces, or multiple traces.
@@ -170,7 +131,7 @@ def _process_multiple_locations(row, threshold:float=0.9):
     """
     multiple_processing = pd.DataFrame({'locations': row['locations'], \
                                         'traces': [Stream([tr for tr in row['traces'] if tr.stats.location == loc]) for loc in row['locations']]})
-    multiple_processing = _process_checks(multiple_processing, threshold)
+    multiple_processing['error'] = _process_checks(multiple_processing, threshold)
     mask = (multiple_processing['error'].isna())
     if not multiple_processing.loc[mask].empty: 
         selection = multiple_processing.loc[mask].copy()
@@ -219,13 +180,114 @@ def _write_cmt(evst:pd.DataFrame):
             with open(full_path, 'w') as f: f.write(f"{row.cmt}\n")
     return
 
-def process_chunk(chunk:pd.DataFrame, resp:Stream, pwt:float):
+### download functions
+
+def event_sort(rows_to_sort:list[list],
+               chunksize:int,
+               last:bool=False
+               ) -> tuple[list[list[int]], list[list]]:
+    """
+    :type rows_to_sort: list
+    :param rows_to_sort: containing Index, window_start, window_end
+    :return: list of list of indices
+    """
+    sorted_rows = sorted(rows_to_sort, key=lambda x: (x[1], x[2]))
+    to_group = sorted_rows
+    groups = []
+    min_input_size = 0 if last else chunksize
+    
+    while len(to_group) > min_input_size:
+        grouped = [to_group[0][0]] # put first index in first group
+        prev_end:UTCDateTime = to_group[0][2] # set previous end time to first event's end time
+        to_group_again = [] # list to hold events that will be grouped in the next iteration
+
+        for i in range(1, len(to_group)):
+            if len(grouped) >= chunksize:
+                to_group_again.extend(to_group[i:])
+                break
+            if prev_end > to_group[i][1]: # if previous end time is greater than current start time, they overlap
+                to_group_again.append(to_group[i])
+            else:
+                grouped.append(to_group[i][0]) # add index to current group
+                prev_end = to_group[i][2] # update previous end time
+
+        groups.append(grouped)
+        to_group = to_group_again
+
+    return (groups, to_group)
+
+def event_sort_old(events):
+    """
+    Sort events into groups avoiding overlapping time windows. 
+    Returns a list of dataframes, each containing events which don't overlap in time.
+
+    :type events: pandas.DataFrame
+    :param events: dataframe containing events with 'window_start' and 'window_end' columns
+    :return: list of pandas.DataFrame, each containing non-overlapping events
+    """
+    gp = []
+    window_idx = events.columns.get_indexer(['window_start', 'window_end'])
+    for i, e in enumerate(events.itertuples()):
+        if not gp: gp = [[[i, e]]]; continue
+        else: 
+            j = i - len(gp)
+            condition = overlap(events.iloc[j,window_idx[0]], events.iloc[j,window_idx[1]], e.window_start, e.window_end)
+            if condition:
+                gp.append([[i, e]]); continue
+            else:
+                idx = [m for m, g in enumerate(gp) if g[-1][0] == j][0]
+                gp[idx].append([i, e]); continue
+    return [pd.DataFrame([ev[1] for ev in g]) for g in gp]
+
+def chunk_generator(evst:pd.DataFrame, chunksize:int=50) -> list[pd.DataFrame]:
+    """
+    Generate chunks of events for processing.
+
+    :type evst: pandas.DataFrame
+    :param evst: dataframe containing events
+    :type chunksize: int
+    :param chunksize: number of events per chunk
+    :rtype: list[pd.DataFrame]
+    :return: list of dataframes, each containing a chunk of events
+    """
+    sorted_evst_list = event_sort(evst) # retains the original indexing in column 'Index'
+    request_chunks = [df.iloc[i:i+chunksize] 
+                      for df in sorted_evst_list 
+                      for i in range(0, len(df), chunksize)]
+    return request_chunks
+
+def request_waveforms(client:Client, request_list:list) -> tuple[Stream | None, str | None]:
+    """
+    Request waveforms (bulk) from the ObsPy FDSN client for a list of requests.
+    :type client: obspy.clients.fdsn.Client
+    :param client: ObsPy Client object
+    :type request_list: list
+    :param request_list: list of lists containing request parameters for each event-station pair
+    :rtype: tuple[obspy.Stream | None, str | None]
+    :return: tuple containing the response stream and an error message (if any)
+    """
+    try: 
+        resp = client.get_waveforms_bulk(request_list)
+        error = None
+    except Exception as e:
+        resp = None
+        if hasattr(e, 'status_code'): 
+            error = int(e.status_code) # not sure if this is problematic
+            print(f"Error status code: {type(e).__name__}/{e.status_code}")
+        else: 
+            error = type(e).__name__
+            print(f"Error in bulk request: {error}")
+    return resp, error
+
+def process_chunk(chunk:pd.DataFrame, resp:Stream, pwt:float,
+                  _keep_columns=None):
     """
     
     :type resp: obspy.Stream
     :type pwt: float
     :param pwt: process window threshold, used for matching traces to events
     """
+    if _keep_columns is None: _keep_columns = chunk.columns.tolist()
     # initialise columns
     init_cols = ['error', 'traces', 'grouped_traces', 'trace_count', 'window_threshold', 'summed_trace_lengths', 'locations']
     bool_cols = ['multiple_locations']
@@ -237,54 +299,54 @@ def process_chunk(chunk:pd.DataFrame, resp:Stream, pwt:float):
     # check for streams with multiple locations
     chunk['locations'] = chunk['traces'].apply(multiple_location_check)
     chunk.loc[(chunk['locations'].str.len() > 1) & chunk['error'].isna(), ['error', 'multiple_locations']] = ("multiple_locations", True)
-    
-    # deal with single location streams
+
+    # masks
+    ml_mask = chunk['multiple_locations'] # mask for multiple locations
     sl_mask = ~ml_mask & chunk['error'].isna() # mask for single location
+    # deal with single location streams
     if not chunk.loc[sl_mask].empty:
         chunk.loc[sl_mask, 'error'] = _process_checks(evst=chunk.loc[sl_mask])
     # deal with multiple location streams
-    ml_mask = chunk['multiple_locations'] # mask for multiple locations
+    
     if not chunk.loc[ml_mask].empty: 
         chunk.loc[ml_mask, ['grouped_traces', 'error']] = chunk.loc[ml_mask].apply(lambda row: _process_multiple_locations(row=row), axis=1).values
 
     mask = (chunk['error'].isna())
-
-    # write traces to disk
-    if not chunk.loc[mask].empty: _write_traces(chunk.loc[mask])
     mt_mask = (chunk['error'].str.contains('multiple_traces', na=False))
-    if not chunk.loc[mt_mask].empty: _write_traces(chunk.loc[mt_mask], mt=True)
+    ch_mask = mask | mt_mask
 
-    # write CMT files to disk
-    cmt_mask = mask | mt_mask
-    cmt_evst = chunk.loc[cmt_mask].drop_duplicates(subset=['evtime'])
-    if not cmt_evst.empty: _write_cmt(cmt_evst)
+    # write channel column
+    chunk['channel'] = np.where(ch_mask, chunk['req_chan'].str[0], None)
 
     # write status column
     de_mask = (chunk['error'].str.contains('data_exception', na=False))
-    mc_mask = (chunk['error'].str.contains('multiple_components', na=False))
+    mc_mask = (chunk['error'].str.contains('missing_components', na=False))
     st_mask = (chunk['error'].str.contains('short_traces', na=False))
     chunk.loc[de_mask, 'status'] = 2 # data exception
     chunk.loc[mc_mask, 'status'] = 3 # missing components
     chunk.loc[st_mask, 'status'] = 4 # short traces
-    chunk.loc[ml_mask, 'status'] = 5 # multiple locations
-    chunk.loc[mt_mask, 'status'] = 6 # multiple traces
+    chunk.loc[mt_mask, 'status'] = 5 # multiple traces
     chunk.loc[mask, 'status'] = 10 # success
 
-    out = chunk[['Index', 'node', 'network', 'station', 'stcode', 'cmt', 'evtime', 'evlat', 'evlon', 'evdep', 
-                 'moment_magnitude', 'evpath', 'stlat', 'stlon', 'stelev', 'epi_dist', 'bands', 'ptime', 
-                 'window_start', 'window_end', 'req_start', 'req_end', 'log_path', 'status', 'data_path', 
-                 'req_chan', 'bulk_request', 'error']] # remove some darn columns
+    _keep_columns.extend(['channel', 'error', 'grouped_traces'])
+    out = chunk[_keep_columns]
     return out
 
-def log_chunk(chunk:pd.DataFrame):
+def log_chunk(chunk_idx:int, chunk:pd.DataFrame, path:str):
+    """
+    Logs the results of chunk processing to a file.
+    
+    """
     for _, group in (chunk.groupby('stcode')):
         log_path = group['log_path'].iloc[0]
-        log_lines = [f"{row.Index}, {row.data_path}, {row.req_chan}, {row.status}, {row.error}\n" 
+        log_lines = [f"{row.Index}, {row.data_path}, {row.channel}, {row.status}, {row.error}\n" 
                      for row in group.itertuples()]
         with open(log_path, 'a+') as f: f.write(''.join(log_lines))
+
+    chunk_log = chunk[['Index', 'data_path', 'channel', 'status', 'error']]
+    chunk_log.insert(0, 'chunk_idx', chunk_idx)
+    chunk_log.to_csv(path, mode='a+', header=False, index=False)
     return
-
-
 
 ### metadata fixes
 
@@ -302,12 +364,13 @@ def fix_delta(delta:float):
     position = len(delta_str.replace('.', '').split('99')[0])
     return round(delta, position + multiplier)
 
-def check_polarity_ori(station):
+def check_polarity_ori(station:Station) -> int | None:
     """
     Checks the polarity of a station based on the orientation of its three components. 
 
-    :type station: obspy.Station
+    :type station: obspy.core.inventory.station.Station
     :param station: station inventory object
+    :rtype: int | None
     :return: 0 for right-handed (negative polarity) and 1 for left-handed (positive polarity). None if
     the polarity cannot be determined.
     """
@@ -327,7 +390,7 @@ def check_polarity_ori(station):
         if cp[-1] * z_vec[-1] > 0: return 0 # right handed (negative polarity)
         if cp[-1] * z_vec[-1] < 0: return 1 # left handed (positive polarity)
 
-def check_polarity_sen(row:pd.Series, st=Stream, client:Client=None):
+def check_polarity_sen(row:pd.Series, st=Stream, client:Client=None) -> int | None:
     """
     Checks the polarity of a station based on the instrument sensitivity of its three components.
     Requires evst dataframe. 
@@ -338,7 +401,9 @@ def check_polarity_sen(row:pd.Series, st=Stream, client:Client=None):
     :param st: stream containing the three components of the station
     :type client: obspy.clients.fdsn.Client
     :param client: ObsPy Client object
-    
+    :rtype: int | None
+    :return: 0 for right-handed (negative polarity) and 1 for left-handed (positive polarity). None if 
+    the polarity cannot be determined.
     """
     if not client: 
         node = row.node
@@ -359,7 +424,14 @@ def check_polarity_sen(row:pd.Series, st=Stream, client:Client=None):
         return None
     
 
-def update_sac(row:pd.Series, inv:Inventory, client:Client):
+def update_sac(row, inv:Inventory, client:Client) -> list:
+    """
+    
+    :type inv: obspy.core.inventory.inventory.Inventory
+    :param inv: ObsPy Inventory object
+    :type client: obspy.clients.fdsn.Client
+    :param client: ObsPy Client object
+    """
     
     print(f'{row.Index}: reading {row.data_path}')
 
@@ -402,36 +474,36 @@ def update_sac(row:pd.Series, inv:Inventory, client:Client):
         else: delta = stats.delta
 
         header = {'npts': stats.npts,
-                'b': b,
-                'e': e,
-                'delta': delta,
-                'idep': 5, # unknown before response correction
-                'depmin': np.float32(np.min(tr[:])),
-                'depmax': np.float32(np.max(tr[:])),
-                'depmen': np.float32(np.mean(tr[:])),
-                'nzyear': row.evtime.year,
-                'nzjday': row.evtime.dayofyear,
-                'nzhour': row.evtime.hour,
-                'nzmin': row.evtime.minute,
-                'nzsec': int(row.evtime.second),
-                'nzmsec': int(row.evtime.microsecond / 1000),
-                'iztype': 11, # reference time is event time
-                'kevnm': evid,
-                'knetwk': stats.network,
-                'kstnm': stats.station,
-                'kcmpnm': stats.channel,
-                'cmpaz': chan.azimuth,
-                'cmpinc': chan.dip + 90,
-                'lpspol': lpspol,
-                'stla': row.stlat,
-                'stlo': row.stlon,
-                'stel': row.stelev,
-                'evla': row.evlat,
-                'evlo': row.evlon,
-                'evdp': row.evdep,
-                'lcalda': 1,
-                'user1': row.moment_magnitude,
-                }
+                  'b': b,
+                  'e': e,
+                  'delta': delta,
+                  'idep': 5, # unknown before response correction
+                  'depmin': np.float32(np.min(tr[:])),
+                  'depmax': np.float32(np.max(tr[:])),
+                  'depmen': np.float32(np.mean(tr[:])),
+                  'nzyear': row.evtime.year,
+                  'nzjday': row.evtime.dayofyear,
+                  'nzhour': row.evtime.hour,
+                  'nzmin': row.evtime.minute,
+                  'nzsec': int(row.evtime.second),
+                  'nzmsec': int(row.evtime.microsecond / 1000),
+                  'iztype': 11, # reference time is event time
+                  'kevnm': evid,
+                  'knetwk': stats.network,
+                  'kstnm': stats.station,
+                  'kcmpnm': stats.channel,
+                  'cmpaz': chan.azimuth,
+                  'cmpinc': chan.dip + 90,
+                  'lpspol': lpspol,
+                  'stla': row.stlat,
+                  'stlo': row.stlon,
+                  'stel': row.stelev,
+                  'evla': row.evlat,
+                  'evlo': row.evlon,
+                  'evdp': row.evdep,
+                  'lcalda': 1,
+                  'user1': row.moment_magnitude,
+                  }
         
         tr.stats.sac = header
     
