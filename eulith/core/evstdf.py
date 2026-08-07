@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -16,7 +17,8 @@ iris_cred = ('cocky_swanson', '6b8TEAqkjpQCUKz8') # (username, password)
 def check_restricted(node:str,
                      client:Client=None, eida_cred:str=eida_cred,
                      lat_min:str=32, lat_max:str=72, lon_min:str=-12, lon_max:str=48,
-                     starttime:pd.Timestamp=None, endtime:pd.Timestamp=None):
+                     starttime:pd.Timestamp=None, endtime:pd.Timestamp=None
+                     ) -> tuple[list, list, list]:
     """
     Checks for restricted stations in a given node, and returns lists of networks and stations to remove, as well as stations to check for restricted access.
 
@@ -58,7 +60,8 @@ def check_restricted(node:str,
 
 def test_restricted(stn_to_test:pd.DataFrame, 
                     node_path:str,
-                    eida_cred:str=eida_cred):
+                    eida_cred:str=eida_cred
+                    ) -> list[str]:
     stn_remove = []
     # for stn in stn_check:
     stn_test_req = list(zip(
@@ -74,8 +77,7 @@ def test_restricted(stn_to_test:pd.DataFrame,
     client = Client(node_path, eida_token=eida_cred)
     
     for req in stn_test_req:
-        try:
-            client.get_waveforms(*req)
+        try: client.get_waveforms(*req)
         except Exception as e:
             if hasattr(e, 'status_code'): status = str(e.status_code)
             else: status = type(e).__name__
@@ -97,9 +99,10 @@ def process_stnlist(stnlist_path:str,
                     sr_min:float=1., sr_max:float=100., 
                     bands:list=['L', 'B', 'H'], gain:str='H', 
                     starttime:pd.Timestamp=None, endtime:pd.Timestamp=None,
-                    screen:bool=True, client:Client=None, verbose:bool=True):
+                    screen:bool=True, client:Client=None, verbose:bool=True
+                    ) -> tuple[pd.DataFrame, list] | pd.DataFrame:
     
-    stnlist = read_stnlist(stnlist_path)
+    stnlist:pd.DataFrame = read_stnlist(stnlist_path)
 
     # filtering
     stnlist_filt = stnlist[stnlist['dc'] == node] # filter by node
@@ -139,7 +142,7 @@ def process_stnlist(stnlist_path:str,
     if screen: return stnlist_filt, stn_check
     else: return stnlist_filt
 
-def process_cmt(cmt_path:str, starttime:pd.Timestamp, endtime:pd.Timestamp, verbose:bool=True):
+def process_cmt(cmt_path:str, starttime:pd.Timestamp, endtime:pd.Timestamp, verbose:bool=True) -> pd.DataFrame:
     """
     read CMT catalogue and filter
 
@@ -149,7 +152,10 @@ def process_cmt(cmt_path:str, starttime:pd.Timestamp, endtime:pd.Timestamp, verb
     :param starttime: start time for filtering
     :type endtime: pd.Timestamp
     :param endtime: end time for filtering
-    :return: pd.DataFrame with filtered CMT events
+    :type verbose: bool
+    :param verbose: print verbose output
+    :rtype: pd.DataFrame
+    :return: dataframe with filtered CMT events
     """
     cmt_df = read_cmt(cmt_path)
     cmt_processed = cmt_df[cmt_df['evtime'].between(starttime, endtime)].reset_index(drop=True)
@@ -302,22 +308,20 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     return evst_results
 
-def read_evst(path):
+def read_evst(path:str) -> pd.DataFrame:
     """
     Given a .csv path, reads the evst csv file into the same dtypes as generation.
 
     :type path: str
     :param path: path to the evst csv file
-    :return: pd.DataFrame with the evst data
+    :rtype: pd.DataFrame
+    :return: dataframe with the evst data
     """
-    import pandas as pd
-    from obspy import UTCDateTime
-    import ast
     columns = ['node', 'network', 'station', 'stcode', 'cmt', 'evtime', 'evlat', 'evlon', 'evdep', 'moment_magnitude', \
                'evpath', 'stlat', 'stlon', 'stelev', 'epi_dist', 'bands', 'ptime', 'window_start', 'window_end', \
                'req_start', 'req_end', 'log_path', 'status', 'data_path']
+    # define data types for each column
     dtypes = [str] * 6 + [np.float64] * 4 + [str] * 1 + [np.float64] * 4 + [str] * 1 + [np.float64] * 1 + [str] * 5 + [np.int64] * 1 + [str] * 1
-
     dtype_dict = dict(zip(columns, dtypes))
 
     evst_import = pd.read_csv(path, dtype=dtype_dict)
@@ -327,24 +331,26 @@ def read_evst(path):
 
     keys = ['req_start', 'req_end']
     for k in keys: evst_import[k] = [UTCDateTime(t) for t in evst_import[k]]
-    evst_import['bands'] = evst_import['bands'].apply(lambda x: ast.literal_eval(x) if (", " in x) \
-                                                             else [s.strip("''") for s in x.strip('[]').split(' ')])
+    evst_import['bands'] = evst_import['bands'].apply(lambda x: ast.literal_eval(x) 
+                                                      if (", " in x)
+                                                      else [s.strip("''") for s in x.strip('[]').split(' ')])
     evst_import['bands'] = evst_import['bands'].apply(np.array)
 
     return evst_import
 
-def merge_evsts(evst_list:list, status:str='max'):
+def merge_evsts(evst_list:list[pd.DataFrame], status:str='max') -> pd.DataFrame:
     """
     Merges two evst dataframes, keeping the highest (if 'max') status code 
 
-    :type evst_list: list
+    :type evst_list: list[pd.DataFrame]
     :param evst_list: List of evst dataframes to merge
     :type status: str
     :param status: 'max' or 'min', determines whether to keep the highest or lowest status code when merging
+    :rtype: pd.DataFrame
     :return: Merged evst dataframe
     """
     columns = evst_list[0].columns
-    agg_dict = {col: 'first' for col in columns}
+    agg_dict = {col: 'first' for col in columns} # dictionary to aggregate columns
     agg_dict['status'] = status
     evst_all = pd.concat(evst_list).groupby('data_path', as_index=False).agg(agg_dict)
     return evst_all
