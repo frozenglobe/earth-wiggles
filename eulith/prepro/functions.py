@@ -13,15 +13,48 @@ from eulith.core.trace import trim_trace
 
 ### download tools
 
+def _prepare_chunk(chunk:pd.DataFrame, band_state:int) -> pd.DataFrame:
+    chunk['req_band'] = chunk['bands'].str[band_state] + "?"
+    chunk['bulk_request'] = list(zip(chunk['network'], 
+                                     chunk['station'], 
+                                     ['*'] * len(chunk),
+                                     chunk['req_band'], 
+                                     chunk['req_start'], 
+                                     chunk['req_end']))
+    chunk.reset_index(inplace=True)
+    return chunk
+
+def _generate_next_evst(evst, band_state) -> pd.DataFrame:
+    evst_out = evst.loc[~evst['status'].isin([10, 403])]
+    evst_out = evst_out[evst_out['bands'].apply(lambda x: band_state + 1 < len(x))]
+    return evst_out
+
+def build_bulk_request(chunk) -> list:
+    out = list(zip(chunk['network'], 
+                   chunk['station'], 
+                   ['*'] * len(chunk),
+                   chunk['req_chan'], 
+                   chunk['req_start'], 
+                   chunk['req_end']))
+    return out
+
 def sort_traces(entry, resp, buffer=10):
     """
     Sort traces into the correct event
     """
-    return [tr for tr in resp 
+    return [tr for tr 
+            in resp 
             if time_in_range(entry.loc['req_start'] - buffer, \
                              entry.loc['req_end'] + buffer, \
                              tr.stats.starttime, tr.stats.endtime) \
                and (tr.stats.station == entry.loc['station'])]
+
+def sort_traces_new(row:pd.Series, resp:Stream, buffer=10):
+    resp = resp.select(station=row.station)
+    return [tr for tr
+            in resp
+            if time_in_range(row.req_start - buffer, row.req_end + buffer, \
+                             tr.stats.starttime, tr.stats.endtime)]
 
 def multiple_location_check(traces:list[Trace]):
     """
@@ -34,7 +67,7 @@ def multiple_location_check(traces:list[Trace]):
     if not traces: return []
     return list(set(tr.stats.location for tr in traces))
     
-def group_channels(st:Stream):
+def group_channels(st:Stream) -> dict:
     """
     Group traces into Z, N, E components based on their channel codes. Can take in N1, E2, etc.
     but returns in ZNE.
@@ -50,7 +83,7 @@ def group_channels(st:Stream):
           }
     return out
 
-def count_traces(grouped_dict:dict):
+def count_traces(grouped_dict:dict) -> dict:
     """
     Count number of traces in each component group. 
     
@@ -61,7 +94,7 @@ def count_traces(grouped_dict:dict):
     if not grouped_dict: return {'Z': 0, 'N': 0, 'E': 0}
     return {comp: len(st) for comp, st in grouped_dict.items()}
 
-def sum_trace_lengths(grouped_dict):
+def sum_trace_lengths(grouped_dict) -> dict:
     """
     Returns the total temporal length of traces in each component group.
     
@@ -74,9 +107,7 @@ def sum_trace_lengths(grouped_dict):
            for comp, st in grouped_dict.items()}
     return out
 
-# def _exit_chunk(chunk): 
-
-def _band_sort(band_list:list):
+def _band_sort(band_list:list) -> list:
     """
     If band order needs fixing. 
 
@@ -87,7 +118,7 @@ def _band_sort(band_list:list):
     key = {'L':1, 'B':2, 'H':3}
     return sorted(list(set(band_list)), key=lambda x: (key.get(x[0], 4), x))
 
-def _process_checks(evst:pd.DataFrame, threshold:float=0.9):
+def _process_checks(evst:pd.DataFrame, threshold:float=0.9) -> pd.DataFrame:
     """
     Performs checks on the evst dataframe to identify events with missing components, short traces, or multiple traces.
 
@@ -115,10 +146,10 @@ def _process_checks(evst:pd.DataFrame, threshold:float=0.9):
     evst.loc[mask, 'error'] = [f"multiple_traces_{''.join(sorted([k.lower() for k, v in d.items() if v > 1]))}"
                                 if any(v > 1 for v in d.values()) else None \
                                 for d in evst.loc[mask, 'trace_count']]
-    out = evst['error']
+    out = evst[['grouped_traces', 'error']]
     return out
 
-def _process_multiple_locations(row, threshold:float=0.9):
+def _process_multiple_locations(row, threshold:float=0.9) -> pd.Series:
     """
     Processes events with multiple locations, selecting the 'best' location
     If multiple locations have the same number of traces, selects the one with the minimum summed trace length.
@@ -140,7 +171,7 @@ def _process_multiple_locations(row, threshold:float=0.9):
         out = pd.Series([None, 'data_exception'])
     return out
 
-def _write_traces(evst:pd.DataFrame, mt:bool=False):
+def _write_traces(evst:pd.DataFrame, mt:bool=False) -> None:
     """
     Write out traces to SAC files, creating directories as needed. If mt is True, writes out multiple traces
     per component to directory 'data_mt'.
@@ -151,13 +182,14 @@ def _write_traces(evst:pd.DataFrame, mt:bool=False):
     :param mt: If True, writes out multiple traces per component to directory 'data_mt'.
     """
     evst['data_path'].apply(lambda x: Path(x).mkdir(parents=True, exist_ok=True))
-    filestem = lambda row: f"{row.evtime.strftime('%y%m%d_%H%M%S_')}_{row.station.lower()}"
+    filestem = lambda row: f"{row.evtime.strftime('%y%m%d_%H%M%S_')}{row.station.lower()}"
     if not mt: 
         write_tasks = [(st[0], os.path.join(row.data_path, f"{filestem(row)}.{st[0].stats.channel.lower()}"))
                        for row in evst.itertuples() 
                        for st in row.grouped_traces.values()]
     elif mt:
-        evst['data_path'] = evst['data_path'].apply(lambda x: x.replace('/data/', '/data_mt/'))
+        evst['data_path'] = evst['data_path'].apply(lambda x: x.replace('data/', 'data_mt/'))
+        evst['data_path'].apply(lambda x: Path(x).mkdir(parents=True, exist_ok=True))
         write_tasks = []
         for row in evst.itertuples():
             for st in row.grouped_traces.values():
@@ -169,7 +201,7 @@ def _write_traces(evst:pd.DataFrame, mt:bool=False):
     [tr.write(path, format='SAC') for tr, path in write_tasks]
     return
 
-def _write_cmt(evst:pd.DataFrame):
+def _write_cmt(evst:pd.DataFrame) -> None:
     """
     Write out single CMT lines to event directories
     """
@@ -184,7 +216,6 @@ def _write_cmt(evst:pd.DataFrame):
 
 def event_sort(rows_to_sort:list[list],
                chunksize:int,
-               last:bool=False
                ) -> tuple[list[list[int]], list[list]]:
     """
     :type rows_to_sort: list
@@ -194,9 +225,8 @@ def event_sort(rows_to_sort:list[list],
     sorted_rows = sorted(rows_to_sort, key=lambda x: (x[1], x[2]))
     to_group = sorted_rows
     groups = []
-    min_input_size = 0 if last else chunksize
     
-    while len(to_group) > min_input_size:
+    while to_group:
         grouped = [to_group[0][0]] # put first index in first group
         prev_end:UTCDateTime = to_group[0][2] # set previous end time to first event's end time
         to_group_again = [] # list to hold events that will be grouped in the next iteration
@@ -215,29 +245,6 @@ def event_sort(rows_to_sort:list[list],
         to_group = to_group_again
 
     return (groups, to_group)
-
-def event_sort_old(events):
-    """
-    Sort events into groups avoiding overlapping time windows. 
-    Returns a list of dataframes, each containing events which don't overlap in time.
-
-    :type events: pandas.DataFrame
-    :param events: dataframe containing events with 'window_start' and 'window_end' columns
-    :return: list of pandas.DataFrame, each containing non-overlapping events
-    """
-    gp = []
-    window_idx = events.columns.get_indexer(['window_start', 'window_end'])
-    for i, e in enumerate(events.itertuples()):
-        if not gp: gp = [[[i, e]]]; continue
-        else: 
-            j = i - len(gp)
-            condition = overlap(events.iloc[j,window_idx[0]], events.iloc[j,window_idx[1]], e.window_start, e.window_end)
-            if condition:
-                gp.append([[i, e]]); continue
-            else:
-                idx = [m for m, g in enumerate(gp) if g[-1][0] == j][0]
-                gp[idx].append([i, e]); continue
-    return [pd.DataFrame([ev[1] for ev in g]) for g in gp]
 
 def chunk_generator(evst:pd.DataFrame, chunksize:int=50) -> list[pd.DataFrame]:
     """
@@ -280,7 +287,7 @@ def request_waveforms(client:Client, request_list:list) -> tuple[Stream | None, 
     return resp, error
 
 def process_chunk(chunk:pd.DataFrame, resp:Stream, pwt:float,
-                  _keep_columns=None):
+                  _keep_columns:list=None) -> pd.DataFrame:
     """
     
     :type resp: obspy.Stream
@@ -305,7 +312,7 @@ def process_chunk(chunk:pd.DataFrame, resp:Stream, pwt:float,
     sl_mask = ~ml_mask & chunk['error'].isna() # mask for single location
     # deal with single location streams
     if not chunk.loc[sl_mask].empty:
-        chunk.loc[sl_mask, 'error'] = _process_checks(evst=chunk.loc[sl_mask])
+        chunk.loc[sl_mask, ['grouped_traces', 'error']] = _process_checks(evst=chunk.loc[sl_mask])
     # deal with multiple location streams
     
     if not chunk.loc[ml_mask].empty: 
@@ -316,7 +323,7 @@ def process_chunk(chunk:pd.DataFrame, resp:Stream, pwt:float,
     ch_mask = mask | mt_mask
 
     # write channel column
-    chunk['channel'] = np.where(ch_mask, chunk['req_chan'].str[0], None)
+    chunk['band'] = np.where(ch_mask, chunk['req_band'].str[0], None)
 
     # write status column
     de_mask = (chunk['error'].str.contains('data_exception', na=False))
@@ -328,29 +335,31 @@ def process_chunk(chunk:pd.DataFrame, resp:Stream, pwt:float,
     chunk.loc[mt_mask, 'status'] = 5 # multiple traces
     chunk.loc[mask, 'status'] = 10 # success
 
-    _keep_columns.extend(['channel', 'error', 'grouped_traces'])
+    _keep_columns.extend(['band', 'error', 'grouped_traces'])
     out = chunk[_keep_columns]
     return out
 
-def log_chunk(chunk_idx:int, chunk:pd.DataFrame, path:str):
+def log_chunk(band_state:int, chunk_idx:int, chunk:pd.DataFrame, path:str) -> None:
     """
-    Logs the results of chunk processing to a file.
+    Logs the results of chunk processing to a file. 
     
     """
     for _, group in (chunk.groupby('stcode')):
         log_path = group['log_path'].iloc[0]
-        log_lines = [f"{row.Index}, {row.data_path}, {row.channel}, {row.status}, {row.error}\n" 
+        log_lines = [f"{row.Index}, {row.data_path}, {row.band}, {row.status}, {row.error}\n" 
                      for row in group.itertuples()]
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, 'a+') as f: f.write(''.join(log_lines))
 
-    chunk_log = chunk[['Index', 'data_path', 'channel', 'status', 'error']]
+    chunk_log = chunk[['index', 'data_path', 'band', 'status', 'error']]
     chunk_log.insert(0, 'chunk_idx', chunk_idx)
+    chunk_log.insert(0, 'band_state', band_state)
     chunk_log.to_csv(path, mode='a+', header=False, index=False)
     return
 
 ### metadata fixes
 
-def fix_delta(delta:float):
+def fix_delta(delta:float) -> float:
     """
     Delta is the time interval between samples in a trace. Rounds deltas containing '99...'s,
     based on the position of '99' in its string representation. 
@@ -529,7 +538,7 @@ def prefilt():
 
     return [hz1, hz2, hz3, hz4]
 
-def remove_resp(row:pd.core.frame.Pandas, st:Stream, inv:Inventory, prefilt:list):
+def remove_resp(row, st:Stream, inv:Inventory, prefilt:list):
     """ 
     Removes response from traces in a stream, returns the stream and a log of successes/failures
 
@@ -652,32 +661,3 @@ def rotate_rt(st:Stream, plot=False):
     if plot: st_rot.plot(); print()
     return st_rot
 
-# discard
-
-def __process_multiple_locations(evst:pd.DataFrame, threshold=0.9):
-    """
-    OLD
-    
-    """
-    multiple_processing = pd.DataFrame({'locations': evst['locations'], \
-                                        'traces': [Stream([tr for tr in evst['traces'] if tr.stats.location == loc]) for loc in evst['locations']]})
-    multiple_processing['grouped_traces'] = multiple_processing['traces'].apply(group_channels)
-    multiple_processing['trace_count'] = multiple_processing['grouped_traces'].apply(count_traces)
-    multiple_processing['error'] = [f"missing_components_{''.join(sorted([k.lower() for k, v in d.items() if v == 0]))}"
-                                if any(v == 0 for v in d.values()) else None \
-                                for d in multiple_processing['trace_count']]
-
-    mask = (multiple_processing['error'].isna())
-
-    multiple_processing.loc[mask, 'window_threshold'] = threshold * (evst['req_end'] - evst['req_start'])
-    multiple_processing.loc[mask, 'summed_trace_lengths'] = multiple_processing.loc[mask, 'grouped_traces'].apply(sum_trace_lengths)
-    multiple_processing.loc[mask, 'error'] = [f"short_traces_{''.join(sorted([c.lower() for c, tl in trace_lengths.items() if tl < threshold]))}" \
-                                if any(tl < threshold for tl in trace_lengths.values()) else None \
-                                for trace_lengths, threshold in zip(multiple_processing.loc[mask, 'summed_trace_lengths'], multiple_processing.loc[mask, 'window_threshold'])]
-
-    mask = (multiple_processing['error'].isna())
-    if not multiple_processing.loc[mask].empty: 
-        selection = multiple_processing.loc[mask].copy()
-        return pd.Series([selection.loc[selection['locations'].idxmin(), 'grouped_traces'], None])
-    else:
-        return pd.Series([None, 'data_exception'])

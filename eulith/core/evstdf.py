@@ -291,6 +291,8 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     evst_results = evst_windows.copy()
     evst_results['status'] = 0
+    evst_results['error'] = None
+    evst_results['band'] = None
     path_process = (pd.Series([f"{e}" + str(s)[0] + f"/{c}/" for e, s, c in zip(evst_results.evpath, evst_results.station, evst_results.stcode)])).to_list()
     evst_results['data_path'] = [p[:-1].lower() for p in path_process]
 
@@ -308,7 +310,7 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     return evst_results
 
-def read_evst(path:str) -> pd.DataFrame:
+def read_evst(path:str, new=False) -> pd.DataFrame:
     """
     Given a .csv path, reads the evst csv file into the same dtypes as generation.
 
@@ -322,6 +324,11 @@ def read_evst(path:str) -> pd.DataFrame:
                'req_start', 'req_end', 'log_path', 'status', 'data_path']
     # define data types for each column
     dtypes = [str] * 6 + [np.float64] * 4 + [str] * 1 + [np.float64] * 4 + [str] * 1 + [np.float64] * 1 + [str] * 5 + [np.int64] * 1 + [str] * 1
+    
+    if new: 
+        columns += ['error', 'band']
+        dtypes += [str] * 2
+    
     dtype_dict = dict(zip(columns, dtypes))
 
     evst_import = pd.read_csv(path, dtype=dtype_dict)
@@ -355,3 +362,16 @@ def merge_evsts(evst_list:list[pd.DataFrame], status:str='max') -> pd.DataFrame:
     evst_all = pd.concat(evst_list).groupby('data_path', as_index=False).agg(agg_dict)
     return evst_all
 
+# class evst():
+
+#     def __init__(self, create:bool=False, **kwargs):
+#         if not create:
+#             self.df = read_evst(kwargs['path'])
+#         else: 
+#             self.df = evst_generator(kwargs['cmt_df'], kwargs['stnlist'], tt_model=kwargs.get('tt_model', 'ak135'), stn_check=kwargs.get('stn_check', []), _node_path=kwargs.get('_node_path', None), eida_cred=kwargs.get('eida_cred', eida_cred))
+
+#     def write(self, path:str):
+#         self.df.to_csv(path, index=False)
+
+    
+        

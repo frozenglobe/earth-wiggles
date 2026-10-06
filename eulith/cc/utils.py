@@ -2,6 +2,7 @@ import os
 from glob import glob
 from pathlib import Path
 from datetime import datetime as dt
+import math
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -311,7 +312,12 @@ def parse_cbdata(path:str,
         data_blocks = []
         # put data into numpy arrays for each branch for easier reading
         for branch_block in branch_blocks:
-            branch_data = np.array([[float(s) for s in line.split()] for line in branch_block]).T
+            if not branch_block:
+                data_blocks.append(np.empty((2, 0)))
+                continue
+            block_str = '\n'.join(branch_block)
+            # Parse entire block text directly into a 2D float array
+            branch_data = np.fromstring(block_str, dtype=float, sep=' ').reshape(-1, 2).T
             data_blocks.append(branch_data)
         ev_lookup = {'evid': ev_id, 'n_br': n_br, 'data': data_blocks}
         cb_lookup.append(ev_lookup)
@@ -320,6 +326,32 @@ def parse_cbdata(path:str,
     out:list[dict] = cb_lookup
     if debug: out = (cb_lookup, ev_blocks)
     return out
+
+def parse_pdata(path:str) -> list[dict]:
+    """
+    
+    :type path: str
+    :param path: path to pdata file
+    """
+    with open(path) as f: lines = f.readlines()
+    block_indices = [0] + [(i+1) for i, s in enumerate(lines) if '> > > > >' in s]
+    blocks = [lines[block_indices[i]:block_indices[i+1]] for i in range(len(block_indices)-1)]
+    blocks_list:list[dict] = []
+    for block in blocks:
+        block_dict:dict = {}
+        block_dict['evid'] = block[-1].strip('> > > > >').split(' ')[0]
+        block_data = block[1:-1]
+        branch_indices = [0] + [(i+1) for i, s in enumerate(block_data) if '> > >' in s]
+        branches = [block_data[branch_indices[i]:branch_indices[i+1]] for i in range(len(branch_indices)-1)]
+        block_dict['n_br'] = len(branches)
+        block_dict_list = []
+        for branch in branches:
+            branch_data = np.array([[float(x) for x in s.strip().split(' ')] for s in branch[0:-1]]).T
+            block_dict_list.append(branch_data)
+        block_dict['data'] = block_dict_list
+        blocks_list.append(block_dict)
+
+    return blocks_list
 
 def plot_branches(cb_lookup:list[dict], evidx:int=None, evid:str=None,
                   plot_select:bool=False, 
@@ -474,6 +506,7 @@ def generate_pvt_path(cb_path:str, base_path:str="/space/jhyl3/script_tests/cc/c
     search_results = glob(f"{base_path}/{pvt_search_path}")
     if len(search_results) != 1: raise ValueError(f"Expected 1 result for {search_path}, found {len(search_results)}")
     else: pvt_path = search_results[0]
+
     return pvt_path
 
 def generate_rbsel_path(cb_path:str):
@@ -484,3 +517,82 @@ def generate_rbsel_path(cb_path:str):
     if "CBdata" in cb_path: out = cb_path.replace('CBdata', 'rbsel')
     elif "Cdata" in cb_path: out = cb_path.replace('Cdata', 'rbsel')
     return out
+
+def build_c_matrix(c_data:list[dict], evid:str) -> tuple[str, pd.DataFrame]:
+    """
+    
+    :return: tuple of event ID and C matrix as a pandas DataFrame
+    """
+    event = [s for s in c_data if s['evid'] == evid][0]
+    # temporary hacking together a solution
+    all_freq = []
+    for dataset in event['data']: all_freq += list(dataset[0])
+    freq = pd.Series(sorted(all_freq)).drop_duplicates()
+    n_freq = len(freq)
+    n_br = event['n_br']
+
+    # build the C matrix
+    c_matrix = pd.DataFrame(data=np.zeros((n_freq, n_br)), index=freq, columns=range(1,n_br+1))
+    br_no = 0
+    for branch in event['data']:
+        br_no += 1
+        br_f, br_c = branch
+        for i, f in enumerate(br_f): c_matrix.loc[f, br_no] = br_c[i]
+    c_matrix.replace(0, math.nan, inplace=True)
+    return (evid, c_matrix)
+
+def prelim_filter(c_matrix:pd.DataFrame, p_matrix:pd.DataFrame,
+                  c_min:float=1., c_max:float=8.,
+                  f_min:float=1e-3, f_max:float=0.2) -> tuple[pd.DataFrame]:
+    """
+    takes in c_matrix and p_matrix and filters them based on the provided min/max values for c and f.
+    
+    """
+    c_matrix_ffilt = c_matrix[(c_matrix.index > f_min) & (c_matrix.index < f_max)]
+    c_matrix_compare = c_matrix_ffilt.iloc[:,:-1]
+    n_br = len(c_matrix_compare.columns)
+    c_matrix_cfilt = c_matrix_ffilt.copy()
+    c_matrix_cfilt.iloc[:,:-1] = c_matrix_compare[(c_matrix_compare > c_min) & (c_matrix_compare < c_max)]
+    
+    col_to_rm = []
+    for colname in range(1,n_br+1):
+        condition = (~np.isnan(c_matrix_cfilt.loc[:,colname])).sum() # if all nan then zero
+        if condition == 0: col_to_rm.append(colname)
+    c_matrix_filt = c_matrix_cfilt.drop(columns=col_to_rm)
+
+    p_matrix_ffilt = p_matrix[(p_matrix.index > f_min) & (p_matrix.index < f_max)]
+    p_matrix_filt = p_matrix_ffilt.drop(columns=col_to_rm)
+    freq_filt = c_matrix_filt.index.to_numpy()
+    
+    return freq_filt, c_matrix_filt, p_matrix_filt
+
+def plot_cp_matrix(evid:str, matrix:pd.DataFrame,
+                   phase:bool=False) -> None:
+    freq = matrix.index
+    to_plot_matrix = matrix.drop(columns=['ref'])
+    n_br = len(to_plot_matrix.columns)
+    for i in range(n_br): plt.scatter(freq, to_plot_matrix.iloc[:,i], marker='x', s=5)
+    plt.plot(freq, matrix['ref'], c='black', ls=':')
+    plt.xscale('log')
+    if not phase: plt.ylim(2,7); plt.xlim(0.005, 0.2)
+    plt.title(f"{evid}")
+    plt.show()
+
+def parse_akref(path:str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Read and parse ak135 reference file
+
+    :type path: str
+    :param path: path to ak135 reference file
+    :rtype: tuple[np.ndarray, np.ndarray, np.ndarray]
+    :return: tuple of frequency, velocity (m/s) and velocity (km/s) numpy arrays
+    """
+    # read and parse reference file
+    with open(path, 'r') as f: lines = f.readlines()
+    lines = [[float(x) for x in line.split()] for line in lines]
+    ref_data = np.array(lines)
+    ref_freq = ref_data[:, 0]
+    ref_c_k = ref_data[:, 1]
+    ref_c = ref_c_k * 1000  # convert to m/s
+
+    return ref_freq, ref_c, ref_c_k
