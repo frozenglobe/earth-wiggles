@@ -405,12 +405,15 @@ if __name__ == "__main__":
         # generate CMT dataframe
         cmt_df = process_cmt(cmt_path=cmt_path, starttime=starttime, endtime=endtime, verbose=True)
         # generate event-station pairs
-        evst_results = evst_generator(cmt_df=cmt_df, stnlist=stnlist,
-                                     tt_model=tt_model,
-                                     stn_check=stn_check,
-                                     _node_path=node_path,
-                                     eida_cred=eida_cred)
-
+        try: 
+            evst_results = evst_generator(cmt_df=cmt_df, stnlist=stnlist,
+                                          tt_model=tt_model,
+                                          stn_check=stn_check,
+                                          _node_path=node_path,
+                                          eida_cred=eida_cred)
+        except ValueError: 
+            raise SystemExit("No station-event pairs available after generating evst dataframe. Exiting.")
+        
         evst_results.to_csv(evst_path, mode='w', index=False)
 
     request_state = True

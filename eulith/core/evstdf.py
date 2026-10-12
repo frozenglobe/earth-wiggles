@@ -15,7 +15,7 @@ eida_cred = '/space/jhyl3/.eidatoken'
 iris_cred = ('cocky_swanson', '6b8TEAqkjpQCUKz8') # (username, password)
 
 def check_restricted(node:str,
-                     client:Client=None, eida_cred:str=eida_cred,
+                     client:Client=None, eida_cred:str=None,
                      lat_min:str=32, lat_max:str=72, lon_min:str=-12, lon_max:str=48,
                      starttime:pd.Timestamp=None, endtime:pd.Timestamp=None
                      ) -> tuple[list, list, list]:
@@ -99,9 +99,58 @@ def process_stnlist(stnlist_path:str,
                     sr_min:float=1., sr_max:float=100., 
                     bands:list=['L', 'B', 'H'], gain:str='H', 
                     starttime:pd.Timestamp=None, endtime:pd.Timestamp=None,
-                    screen:bool=True, client:Client=None, verbose:bool=True
+                    screen:bool=True, client:Client=None, eida_cred:str=None,
+                    verbose:bool=True
                     ) -> tuple[pd.DataFrame, list] | pd.DataFrame:
     
+    """
+    Usage: 
+    >>> stnlist, stn_check = process_stnlist(stnlist_path="/tmp/catalogues/stnlist.csv",
+                                             node='LMU',
+                                             lat_min=32., lat_max=72., 
+                                             lon_min=-12., lon_max=48.,
+                                             sr_min=1., sr_max=100.,
+                                             bands=['L', 'B', 'H'], gain='H',
+                                             starttime=pd.Timestamp('2020-01-01'), 
+                                             endtime=pd.Timestamp('2024-12-31T23:59:59'),
+                                             screen=False)
+
+    :type stnlist_path: str
+    :param stnlist_path: path to the station list csv file
+    :type node: str
+    :param node: FDSN node name
+    :type lat_min: float
+    :param lat_min: minimum latitude for station filtering
+    :type lat_max: float
+    :param lat_max: maximum latitude for station filtering
+    :type lon_min: float
+    :param lon_min: minimum longitude for station filtering
+    :type lon_max: float
+    :param lon_max: maximum longitude for station filtering
+    :type sr_min: float
+    :param sr_min: minimum sample rate for station filtering
+    :type sr_max: float
+    :param sr_max: maximum sample rate for station filtering
+    :type bands: list
+    :param bands: list of band types to keep (e.g., ['L', 'B', 'H'])
+    :type gain: str
+    :param gain: gain type to keep (e.g., 'H')
+    :type starttime: pd.Timestamp
+    :param starttime: start time for station filtering
+    :type endtime: pd.Timestamp
+    :param endtime: end time for station filtering
+    :type screen: bool
+    :param screen: whether to check for restricted stations
+    :type client: Client
+    :param client: FDSN client object (optional - need to pass if screen=True)
+    :type verbose: bool
+    :param verbose: print verbose output
+
+
+    :rtype: tuple[pd.DataFrame, list] | pd.DataFrame
+    :return: filtered station list dataframe and list of stations to check for restricted access (if screen=True), otherwise just the filtered station list dataframe
+    """
+
     stnlist:pd.DataFrame = read_stnlist(stnlist_path)
 
     # filtering
@@ -112,6 +161,9 @@ def process_stnlist(stnlist_path:str,
                                 (stnlist_filt['bandgain'].apply(lambda x: x[0] in bands)) & # only keep long corner periods
                                 (stnlist_filt['channel'].apply(lambda x: len(x) == 3)) # filter by existence of three components
                                 ]
+    # fix starttime/endtime
+    if isinstance(starttime, str): starttime = pd.Timestamp(starttime)
+    if isinstance(endtime, str): endtime = pd.Timestamp(endtime)
     # remove restricted stations if screen is True
     if screen: 
         nw_remove, stn_remove, stn_check = check_restricted(node=node, client=client, eida_cred=eida_cred,
@@ -158,6 +210,8 @@ def process_cmt(cmt_path:str, starttime:pd.Timestamp, endtime:pd.Timestamp, verb
     :return: dataframe with filtered CMT events
     """
     cmt_df = read_cmt(cmt_path)
+    if isinstance(starttime, str): starttime = pd.Timestamp(starttime)
+    if isinstance(endtime, str): endtime = pd.Timestamp(endtime)
     cmt_processed = cmt_df[cmt_df['evtime'].between(starttime, endtime)].reset_index(drop=True)
     cmt_processed['evpath'] = cmt_processed['evtime'].dt.strftime('data/%Y/%m/%y%m%d_%H%M%S/')
     cmt_processed = cmt_processed[['cmt', 'evtime', 'evlat', 'evlon', 'evdep', 'moment_magnitude', 'evpath']]
@@ -171,21 +225,20 @@ def evst_generator(cmt_df:pd.DataFrame,
                    tt_model:str='ak135',
                    stn_check:list=[],
                    _node_path:str=None,
-                   eida_cred:str=eida_cred):
+                   eida_cred:str=eida_cred,
+                   vg_min:float=2.8, 
+                   dist_min:float=400., dist_max:float=18000., 
+                   ADIS:float=4.9, BDIS:float=6.67e-5):
     
-    if stnlist.empty: raise SystemExit("No stations available.")
+    if stnlist.empty: raise ValueError("No stations available.")
 
-    if cmt_df.empty: raise SystemExit("No events available.")
+    if cmt_df.empty: raise ValueError("No events available.")
     
     model = TPM(model=tt_model)
     print(f"    Initialised travel time model: {tt_model}")
-    vg_min = 2.8 # minimum group velocity in km/s
+    # minimum group velocity in km/s
     # epicentral distance range in km
-    dist_min = 400
-    dist_max = 18000
     # something to calculate a threshold for Mw
-    ADIS = 4.9
-    BDIS = 6.67e-5
 
     # Filter by events which occur within the station operational time window
     # Compute epicentral distance, filter by magnitude and distance range, remove locations, 
@@ -276,7 +329,7 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     if evst_windows.empty:
         print("No station-event pairs available after computing request windows. Exiting.")
-        raise SystemExit("No station-event pairs available.")
+        raise ValueError("No station-event pairs available.")
 
     print(f"    Computed request windows. Total station-event pairs to request: {len(evst_windows)}")
 
@@ -345,7 +398,7 @@ def read_evst(path:str, new=False) -> pd.DataFrame:
 
     return evst_import
 
-def merge_evsts(evst_list:list[pd.DataFrame], status:str='max') -> pd.DataFrame:
+def merge_evst_dfs(evst_list:list[pd.DataFrame], status:str='max') -> pd.DataFrame:
     """
     Merges two evst dataframes, keeping the highest (if 'max') status code 
 
@@ -361,17 +414,3 @@ def merge_evsts(evst_list:list[pd.DataFrame], status:str='max') -> pd.DataFrame:
     agg_dict['status'] = status
     evst_all = pd.concat(evst_list).groupby('data_path', as_index=False).agg(agg_dict)
     return evst_all
-
-# class evst():
-
-#     def __init__(self, create:bool=False, **kwargs):
-#         if not create:
-#             self.df = read_evst(kwargs['path'])
-#         else: 
-#             self.df = evst_generator(kwargs['cmt_df'], kwargs['stnlist'], tt_model=kwargs.get('tt_model', 'ak135'), stn_check=kwargs.get('stn_check', []), _node_path=kwargs.get('_node_path', None), eida_cred=kwargs.get('eida_cred', eida_cred))
-
-#     def write(self, path:str):
-#         self.df.to_csv(path, index=False)
-
-    
-        
