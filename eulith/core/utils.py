@@ -1,5 +1,5 @@
 # Generic tools
-import ast, os, shutil
+import ast, os, shutil, math
 from glob import glob
 from pathlib import Path
 import numpy as np
@@ -105,6 +105,133 @@ def read_cmt(path:str):
     cmt_df = cmt_df[['cmt', 'evtime', 'year', 'jday', 'hour', 'minute', 'second', 'msecond',
                      'evlat', 'evlon', 'evdep', 'moment_magnitude']]
     return cmt_df
+
+### miscellaneous?
+# def _generate_stcode(stn:lt.Station):
+#     return f"{stn.net}.{stn.name}"
+
+### andrew's shit
+
+def torad(a:list|float):
+    _torad = lambda x: x * math.pi/180
+    if isinstance(a, list): return [_torad(b) for b in a]
+    else: return _torad(a)
+
+def todeg(a:list|float):
+    _todeg = lambda x: x * 180/math.pi
+    if isinstance(a, list): return [_todeg(b) for b in a]
+    else: return _todeg(a)
+
+def colat(a):
+    _colat = lambda x: math.pi/2 - math.atan(0.993277 * math.tan(x))
+    if isinstance(a, list): return [_colat(b) for b in a]
+    else: return _colat(a)
+
+def azbaz(alat,alon,blat,blon,deg=True):
+  if alat==blat and alon==blon:
+    return (0,0,0)
+  if deg:
+    alat=torad(alat)
+    alon=torad(alon)
+    blat=torad(blat)
+    blon=torad(blon)
+  acolat=colat(alat)
+  bcolat=colat(blat)
+  ac1=math.sin(acolat)
+  ac2=math.cos(acolat)
+  ac3=math.sin(alon)
+  ac4=math.cos(alon)
+  bc1=math.sin(bcolat)
+  bc2=math.cos(bcolat)
+  bc3=math.sin(blon)
+  bc4=math.cos(blon)
+
+  ae=bc1*bc4
+  be=bc1*bc3
+  azi1=pow(ae-ac3,2)+pow(be+ac4,2)+bc2*bc2-2.
+  azi2=pow(ae-ac2*ac4,2)+pow(be-ac2*ac3,2)+pow(bc2+ac1,2)-2.
+
+  if azi2==0:
+    azia=math.pi-math.copysign(math.pi/2,azi1)
+  else:
+    azia=math.atan2(azi1,azi2)
+
+  codelb=ac1*(ae*ac4+be*ac3)+ac2*bc2
+  del1=math.acos(codelb)
+  ass=ac1*ac4
+  bs=ac1*ac3
+  azi1=pow(ass-bc3,2)+pow(bs+bc4,2)+ac2*ac2-2.
+  azi2=pow(ass-bc2*bc4,2)+pow(bs-bc2*bc3,2)+pow(ac2+bc1,2)-2.
+  
+  if azi2==0:
+    azib=math.pi-math.copysign(math.pi/2,azi1)
+  else:
+    azib=math.atan2(azi1,azi2)
+  acolat=math.pi/2-alat
+  bcolat=math.pi/2-blat
+
+  ac1=math.sin(acolat)
+  ac2=math.cos(acolat)
+  bc1=math.sin(bcolat)
+  bc2=math.cos(bcolat)
+  ae=bc1*bc4
+  be=bc1*bc3
+  delbod=math.acos(ac1*(ae*ac4+be*ac3)+ac2*bc2)
+  cosdel=math.cos(delbod)
+  x1=(pow(ac2+bc2,2))/(1.+cosdel)
+  x2=(pow(ac2-bc2,2))/(1.-cosdel)
+  x=x1+x2
+  y=x1-x2
+  cotdel=1./math.tan(delbod)
+  sindel=math.sin(delbod)
+  del2=delbod*delbod
+  A=64.*delbod+16.*del2*cotdel
+  D=48.*sindel+8.*del2/cosdel
+  B=-(D+D)
+  E=30.*math.sin(delbod+delbod)
+  C=-30.*delbod-8.*del2*cotdel-E/2.
+  dels=6378.2064*(delbod-.000847518825*(x*delbod-3.*y*sindel)+.0897860195E-6*(x*(A+C*x+D*y)+y*(B+E*y)))
+  if deg:
+    azia=todeg(azia)
+    azib=todeg(azib)
+  return (azia,azib,dels)
+
+def azdif(az1,az2,deg=False):
+    if deg:
+        az1=torad(az1)
+        az2=torad(az2)
+    azdif = abs(az1-az2)
+    if azdif > math.pi: azdif=2*math.pi-azdif
+    elif azdif < 0: azdif=-1
+    if deg:
+        azdif=todeg(azdif)
+    return azdif
+
+def delta(alat,alon,blat,blon,deg=True):
+  if deg:
+    alat=torad(alat)
+    alon=torad(alon)
+    blat=torad(blat)
+    blon=torad(blon)
+  a= sin((blat-alat)/2) * sin((blat-alat)/2) + cos(alat)*cos(blat)*sin((blon-alon)/2)*sin((blon-alon)/2)
+  deltas=2*atan2(sqrt(a),sqrt(1-a))
+  if deg:
+    deltas=todeg(deltas)
+  return deltas
+
+# BROKEN
+
+class Station:
+    def __init__(self, 
+                 node:str=None, network:str=None, name:str=None,
+                 lat:float=None, lon:float=None, elev:float=None):
+        self.node = node
+        self.network = network
+        self.name = name
+        self.lat = lat
+        self.lon = lon
+        self.elev = elev
+        self.stcode = f"{self.network}.{self.name}"
 
 ### pandas tools
 

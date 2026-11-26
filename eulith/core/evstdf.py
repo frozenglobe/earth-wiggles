@@ -77,6 +77,7 @@ def test_restricted(stn_to_test:pd.DataFrame,
     client = Client(node_path, eida_token=eida_cred)
     
     for req in stn_test_req:
+        print(f"Testing {req[0]}.{req[1]} for restricted access...")
         try: client.get_waveforms(*req)
         except Exception as e:
             if hasattr(e, 'status_code'): status = str(e.status_code)
@@ -154,7 +155,10 @@ def process_stnlist(stnlist_path:str,
     stnlist:pd.DataFrame = read_stnlist(stnlist_path)
 
     # filtering
-    stnlist_filt = stnlist[stnlist['dc'] == node] # filter by node
+    if not (node == 'all'): 
+        stnlist_filt = stnlist[stnlist['dc'] == node] # filter by node
+        screen = False
+    else: stnlist_filt = stnlist
     stnlist_filt = latlon_filter(stnlist_filt, lat_min, lat_max, lon_min, lon_max) # filter by latlon
     stnlist_filt = stnlist_filt[(stnlist_filt['samplerate'].between(sr_min, sr_max)) & # filter by sample rate
                                 (stnlist_filt['bandgain'].apply(lambda x: x[1] == gain)) & # filter by gain
@@ -194,7 +198,10 @@ def process_stnlist(stnlist_path:str,
     if screen: return stnlist_filt, stn_check
     else: return stnlist_filt
 
-def process_cmt(cmt_path:str, starttime:pd.Timestamp, endtime:pd.Timestamp, verbose:bool=True) -> pd.DataFrame:
+def process_cmt(cmt_path:str, 
+                starttime:pd.Timestamp=None, 
+                endtime:pd.Timestamp=None, 
+                verbose:bool=True) -> pd.DataFrame:
     """
     read CMT catalogue and filter
 
@@ -210,9 +217,11 @@ def process_cmt(cmt_path:str, starttime:pd.Timestamp, endtime:pd.Timestamp, verb
     :return: dataframe with filtered CMT events
     """
     cmt_df = read_cmt(cmt_path)
-    if isinstance(starttime, str): starttime = pd.Timestamp(starttime)
-    if isinstance(endtime, str): endtime = pd.Timestamp(endtime)
-    cmt_processed = cmt_df[cmt_df['evtime'].between(starttime, endtime)].reset_index(drop=True)
+    if starttime or endtime: 
+        if isinstance(starttime, str): starttime = pd.Timestamp(starttime)
+        if isinstance(endtime, str): endtime = pd.Timestamp(endtime)
+        cmt_processed = cmt_df[cmt_df['evtime'].between(starttime, endtime)].reset_index(drop=True)
+    else: cmt_processed = cmt_df
     cmt_processed['evpath'] = cmt_processed['evtime'].dt.strftime('data/%Y/%m/%y%m%d_%H%M%S/')
     cmt_processed = cmt_processed[['cmt', 'evtime', 'evlat', 'evlon', 'evdep', 'moment_magnitude', 'evpath']]
     if verbose:
@@ -228,14 +237,15 @@ def evst_generator(cmt_df:pd.DataFrame,
                    eida_cred:str=eida_cred,
                    vg_min:float=2.8, 
                    dist_min:float=400., dist_max:float=18000., 
-                   ADIS:float=4.9, BDIS:float=6.67e-5):
+                   ADIS:float=4.9, BDIS:float=6.67e-5,
+                   verbose:bool=False):
     
     if stnlist.empty: raise ValueError("No stations available.")
 
     if cmt_df.empty: raise ValueError("No events available.")
     
     model = TPM(model=tt_model)
-    print(f"    Initialised travel time model: {tt_model}")
+    if verbose: print(f"    Initialised travel time model: {tt_model}")
     # minimum group velocity in km/s
     # epicentral distance range in km
     # something to calculate a threshold for Mw
@@ -271,7 +281,7 @@ def evst_generator(cmt_df:pd.DataFrame,
     evst_match.drop_duplicates(subset=['stcode', 'bandgain', 'evtime'], inplace=True) # removes unique locations
     evst_match.drop(['location', 'stn_loc', 'channel', 'samplerate'], axis=1, inplace=True) # remove unneeded columns
 
-    print(f"    Generated station-event pairs, filtered by magnitude and epicentral distance.")
+    if verbose: print(f"    Generated station-event pairs, filtered by magnitude and epicentral distance.")
 
     query = """
     SELECT
@@ -292,6 +302,7 @@ def evst_generator(cmt_df:pd.DataFrame,
     evst_band_combined = duckdb.query(query).to_df()
 
     # Compute theoretical P-wave travel times and window start/end times
+    if verbose: print(f"    Computing theoretical P-wave travel times...")
     evst_band_combined['dist_deg_round'] = evst_band_combined['dist_deg'].round(1)
     evst_band_combined['evdep_round'] = (evst_band_combined['evdep'] / 2).round() * 2
     unique_pairs = evst_band_combined[['evdep_round', 'dist_deg_round']].drop_duplicates()
@@ -306,7 +317,7 @@ def evst_generator(cmt_df:pd.DataFrame,
         
     evst_band_combined['ptime'] = [cache.get((z, d)) for z, d in zip(evst_band_combined.evdep_round, evst_band_combined.dist_deg_round)]
 
-    print(f"    Computed theoretical P-wave travel times.")
+    if verbose: print(f"    Computed theoretical P-wave travel times.")
 
     query = f"""
     WITH calc_window AS (
@@ -351,6 +362,11 @@ def evst_generator(cmt_df:pd.DataFrame,
 
     # test availability of stations in networks with partially restricted access
     evst_stn_check = evst_results[evst_results['stcode'].isin(stn_check)]
+    evst_stn_check.drop_duplicates('stcode', inplace=True)
+
+    # # debug
+    # evst_stn_check.to_csv("logs/stn_check.csv", index=False)
+    # raise SystemExit("Debug")
 
     if not evst_stn_check.empty:
         print(f"Testing stations with ambiguous restricted status")
