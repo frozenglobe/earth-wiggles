@@ -30,9 +30,10 @@ def read_pair_evs(pair_evs_path:str) -> tuple[pd.DataFrame, float]:
                     'direction', 'cmp', 'path1', 'path2']
     full = pd.read_csv(pair_evs_path, sep='\s+', header=None, names=header_names)
     intrstn_dist_km = full['s1_s2_dist'].iloc[0] * np.pi / 180 * 6371 # convert degrees to km
+    epidist_km = full['s1_ev_dist'].iloc[0] * np.pi / 180 * 6371 # convert degrees to km
     condensed = full[['evid', 'direction', 'path1', 'path2']]
 
-    return condensed, intrstn_dist_km
+    return condensed, intrstn_dist_km, epidist_km
 
 def butter3(lcp:float=800., 
             hcp:float=4., 

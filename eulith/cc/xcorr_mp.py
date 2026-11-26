@@ -13,7 +13,7 @@ njob_xc = 8
 pairs_df = pd.read_csv("/space/jhyl3/prod/cc/pairs_df_50ev.csv").iloc[:16]
 wt = "Ra"
 pairs_dir = "/space/jhyl3/prod/cc/pairs_z10"
-write_dir = "/space/jhyl3/script_tests/cc/rewrite/pvtas_prod_out_t4"
+write_dir = "/space/jhyl3/script_tests/cc/rewrite/pvtas_prod_out_t6"
 Path(write_dir).mkdir(parents=True, exist_ok=True)
 
 # global
@@ -74,13 +74,17 @@ def pair_xcorr_mp(buffer_in:mp.Queue,
         
         else: 
             pair = item
-            n_ev = pair_xcorr(pair, wt, pairs_dir, write_dir, 
-                              gamma, gammaw_ref, gammaw_ref_idkm,
-                              maxlag_ref, maxlag_ref_idkm, 
-                              fmax, nfmax, 
-                              mineos_outpath,
-                              guide_type,
-                              verbose,
+            n_ev = pair_xcorr(pair=pair,
+                              wt=wt,
+                              pairs_dir=pairs_dir,
+                              write_dir=write_dir, 
+                              mineos_outpath=mineos_outpath,
+                              gamma=gamma,
+                              gammaw_ref=gammaw_ref, gammaw_ref_idkm=gammaw_ref_idkm,
+                              maxlag_ref=maxlag_ref, maxlag_ref_idkm=maxlag_ref_idkm, 
+                              fmax=fmax, nfmax=nfmax, 
+                              guide_type=guide_type,
+                              verbose=verbose,
                               timeit=True)
             ev_count += n_ev
             pairs_count += 1

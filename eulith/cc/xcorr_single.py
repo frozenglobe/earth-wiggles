@@ -1,5 +1,6 @@
+import h5py
 import numpy as np
-from eulith.cc.xcorr_routines import ev_xcorr
+from eulith.cc.xcorr_routines import ev_xcorr, generate_paev_path, read_pair_evs
 
 if __name__ == "__main__":
     wt = "Ra"
@@ -22,23 +23,36 @@ if __name__ == "__main__":
 
     gamma = 6
 
-    pair = "HL.ITM_IU.GNI"
+    pair = "FR.LABF_FR.VERF"
 
     pair_evs_path = generate_paev_path(pairs_dir, pair, wt)
-    pair_evs, intrstn_dist_km = read_pair_evs(pair_evs_path)
+    pair_evs, intrstn_dist_km, epidist_km = read_pair_evs(pair_evs_path)
 
     gammaw_calc = lambda id_km: (gammaw_ref[1] - gammaw_ref[0]) / (gammaw_ref_idkm[1] - gammaw_ref_idkm[0]) * (id_km - gammaw_ref_idkm[0]) + gammaw_ref[0]
     gammaw = gammaw_calc(intrstn_dist_km)
 
-    evid = "201012_003039"
+    evid = "240923_231420"
     ev = pair_evs[pair_evs.evid == evid].iloc[0]
 
-    f_list, arg_list, reference = ev_xcorr(ev, intrstn_dist_km,
+    f_list, arg_list, reference = ev_xcorr(ev, 
+                                           intrstn_dist_km,
+                                           pvref_read,
+                                           gamma, gammaw,
                                            maxlag_ref, maxlag_ref_idkm,
                                            fmax, nfmax,
-                                           gamma,
-                                           pvref_read,
                                            guide_type=1,
                                            verbose=False)
 
-    print(arg_list)
+    hfile = f"/space/jhyl3/script_tests/cc/rewrite/pvtas_prod_out_t5/{pair}.h5"
+    with h5py.File(hfile, "w") as h:
+        h.create_dataset(f"{wt}/{ev.evid}", (3, len(f_list)), 
+                            data=np.array([f_list, arg_list, reference]))
+        dset = h[f"{wt}/{ev.evid}"]
+        dset.attrs['flim'] = (f_list[0], f_list[-1])
+        dset.attrs['nf'] = len(f_list)
+        dset.attrs['gamma'] = gamma
+        dset.attrs['gammaw'] = gammaw
+        h.attrs['pair'] = pair
+        h.attrs['intrstn_dist_km'] = intrstn_dist_km
+        h.attrs['epidist_km'] = epidist_km
+        
