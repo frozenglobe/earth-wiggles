@@ -30,9 +30,14 @@ def pairs_stats(pairs_list_path:str,
                            columns=['pair', 's1lon', 's1lat', 's2lon', 's2lat', 'intrstn_dist', 'n_Ra', 'n_Lo'])
     pair_df['n_Ra'] = pair_df['n_Ra'].astype(int)
     pair_df['n_Lo'] = pair_df['n_Lo'].astype(int)
+    pair_df['s1lon'] = pair_df['s1lon'].astype(float)
+    pair_df['s1lat'] = pair_df['s1lat'].astype(float)
+    pair_df['s2lon'] = pair_df['s2lon'].astype(float)
+    pair_df['s2lat'] = pair_df['s2lat'].astype(float)
+
+    pair_df['n_ev'] = pair_df[['n_Ra', 'n_Lo']].max(axis=1) # to fix
 
     if condensed: 
-        pair_df['n_ev'] = pair_df[['n_Ra', 'n_Lo']].max(axis=1)
         pair_df = pair_df[['pair', 'n_ev']]
 
     return pair_df
@@ -83,8 +88,8 @@ def generate_pvt_input(pairs_dir:str,
             # prevents FileNotFoundErrors
             Path(out_dir).mkdir(parents=True, exist_ok=True)
             # control the output file name based on whether a list name is provided
-            out_path = f"{out_dir}/pvta_input_{cmp}.list"
-            if list_name: out_path = f"{out_dir}/pvta_input_{cmp}_{list_name}.list"
+            out_path = f"{out_dir}/pvtain_{cmp}.list"
+            if list_name: out_path = f"{out_dir}/pvtain_{cmp}_{list_name}.list"
 
             with open(out_path, "w") as f:
                 for path in type_list: f.write(f"{path}\n")
