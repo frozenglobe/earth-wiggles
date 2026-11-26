@@ -28,6 +28,7 @@ def chunk_generator(evst:pd.DataFrame, buffer_out:mp.Queue,
     :param cglog_path: Path to the chunk log file
     :param mlog: Master log file for logging each worker's progress
     """
+    print(f"    {pd.Timestamp.now()}    CHUNK GENERATOR :: running    {os.getpid()}")
     mlog.write(f">   {pd.Timestamp.now()}    CG: running    {os.getpid()}\n")
     mlog.write(f"    bs {band_state}\n")
     mlog.flush()
@@ -66,6 +67,8 @@ def chunk_generator(evst:pd.DataFrame, buffer_out:mp.Queue,
 
     cglog.close()
     for _ in range(nds): buffer_out.put(None)
+
+    print(f"    {pd.Timestamp.now()}    CHUNK GENERATOR :: done    {os.getpid()}")
 
 def query(node_path:str, eida_cred:str,
           client:Client,
@@ -118,7 +121,7 @@ def query(node_path:str, eida_cred:str,
             chunk_out = chunk[_keep_columns]
             out = (chunk_idx, chunk_out, resp_tuple)
             buffer_out.put(out)
-            if verbose: print(f"    QUERY: ({chunk_idx}) Chunk queried from server.")
+            if verbose: print(f"    [{pd.Timestamp.now()}] QUERY: ({chunk_idx}) Chunk queried from server.")
 
     for _ in range(nds): buffer_out.put(None) # signal end of processing
 
@@ -164,7 +167,7 @@ def process(buffer_in:mp.Queue, buffer_out:mp.Queue,
             chunk_idx, chunk, resp_tuple = item
             resp, resp_error = resp_tuple
             chunk_time_start = pd.Timestamp.now()
-            if verbose: print(f"    PROCESSOR: ({chunk_idx}) Chunk started processing.")
+            # if verbose: print(f"    [{chunk_time_start}] PROCESSOR: ({chunk_idx}) Chunk started processing.")
             # handle request response
             if not resp:
                 chunk['band'] = None
@@ -176,7 +179,7 @@ def process(buffer_in:mp.Queue, buffer_out:mp.Queue,
                 else: 
                     chunk['status'] = 2 # no traces
                     chunk['error'] = "no_traces"
-                if verbose: print(f"    PROCESSOR: ({chunk_idx}) No traces retrieved from server. Finished chunk.")
+                # if verbose: print(f"    [{pd.Timestamp.now()}] PROCESSOR: ({chunk_idx}) No traces retrieved from server. Finished chunk.")
     
             else: # and if resp is successful
                 # process chunk
@@ -187,7 +190,7 @@ def process(buffer_in:mp.Queue, buffer_out:mp.Queue,
                     chunk['error'] = "process_error"
                     chunk['band'] = None
                 chunk_time_end = pd.Timestamp.now()
-                if verbose: print(f"    PROCESSOR: ({chunk_idx}) Finished processing chunk. PROCESS TIME: {(chunk_time_end - chunk_time_start).floor('s')}")
+                if verbose: print(f"    [{chunk_time_end}] PROCESSOR: ({chunk_idx}) Finished processing chunk. PROCESS TIME: {(chunk_time_end - chunk_time_start).floor('s')}")
             chunk['status'] = chunk['status'].astype('int64') # ensure status is int64
             out = (chunk_idx, chunk)
             buffer_out.put(out)
@@ -221,7 +224,7 @@ def write(evst:pd.DataFrame, band_state:int,
             
         else:
             chunk_idx, chunk = item
-            if verbose: print(f"    WRITER: ({chunk_idx}) Writing chunk and logs to disk.")
+            # if verbose: print(f"    WRITER: ({chunk_idx}) Writing chunk and logs to disk.")
 
             mask = (chunk['error'].isna())
             # write traces to disk
@@ -240,7 +243,7 @@ def write(evst:pd.DataFrame, band_state:int,
             # update evst dataframe with chunk results
             evst.loc[chunk['index'], ['status', 'error', 'band']] = chunk[['status', 'error', 'band']].values
 
-            if verbose: print(f"    WRITER: ({chunk_idx}) Finished writing chunk and logs to disk.")
+            if verbose: print(f"    [{pd.Timestamp.now()}] WRITER: ({chunk_idx}) Finished writing chunk and logs to disk.")
 
     print(f"    WRITER: Writing evst results dataframe")
     evst.to_csv(evst_path, mode='w', index=False) # safe option
@@ -478,8 +481,9 @@ if __name__ == "__main__":
         print('< All processes done.')
 
         # generate the next input evst
-        input_evst = read_evst(evst_path, new=True)[cols_condensed]
-        input_evst = _generate_next_evst(input_evst, band_state=band_state)
+        evst_results = read_evst(evst_path, new=True)[cols_condensed]
+        if args.verbose: print(f"Generating next input evst for bs {band_state+1}")
+        input_evst = _generate_next_evst(evst_results, band_state=band_state)
         band_state += 1
         print(f'increasing band state to {band_state}')
     
